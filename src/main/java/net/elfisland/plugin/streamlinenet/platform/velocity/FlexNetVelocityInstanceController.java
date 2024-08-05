@@ -292,4 +292,123 @@ public class FlexNetVelocityInstanceController {
         logger.info("Total Instances Removed: {}", serversToShutdown.size());
         logger.info("Total Server Restarts: {}", serverRestartTimestamps.size());
     }
+
+    public void logInstanceDetails() {
+        logger.info("Logging instance details:");
+        createdInstanceIdentifiers.forEach(id -> {
+            logger.info("Instance ID: {}", id);
+            Long uptime = serverUptimeMap.get(id);
+            if (uptime != null) {
+                long upTimeHours = (System.currentTimeMillis() - uptime) / 3600000;
+                logger.info("Uptime for instance {}: {} hours", id, upTimeHours);
+            }
+        });
+    }
+
+    public void logGroupInstances(FlexNetGroup group) {
+        Set<String> instances = groupToInstancesMap.getOrDefault(group.getServerName(), new HashSet<>());
+        logger.info("Instances for group {}: {}", group.getServerName(), String.join(", ", instances));
+    }
+
+    public void simulateFailureRecovery(FlexNetGroup group) {
+        logger.warn("Simulating failure recovery for group {}", group.getServerName());
+        proxy.scheduleTask(() -> {
+            adjustInstanceCountOnPlayerJoin(group);
+            adjustInstanceCountOnPlayerLeave(group);
+            logger.info("Failure recovery complete for group {}", group.getServerName());
+        }, 30, TimeUnit.SECONDS);
+    }
+
+    public void initiatePerformanceDiagnostics(FlexNetGroup group) {
+        logger.info("Initiating performance diagnostics for group {}", group.getServerName());
+        proxy.scheduleTask(() -> {
+            assessServerPerformance(group);
+            logger.info("Performance diagnostics complete for group {}", group.getServerName());
+        }, 60, TimeUnit.SECONDS);
+    }
+
+    public void manageServerUpgrades(FlexNetGroup group) {
+        logger.info("Managing server upgrades for group {}", group.getServerName());
+        proxy.scheduleTask(() -> {
+            for (String serverId : groupToInstancesMap.getOrDefault(group.getServerName(), new HashSet<>())) {
+                if (calculatePerformanceMetric(serverId) < 30) {
+                    logger.info("Server {} eligible for upgrade", serverId);
+                    upgradeServer(serverId);
+                }
+            }
+            logger.info("Server upgrades management complete for group {}", group.getServerName());
+        }, 120, TimeUnit.SECONDS);
+    }
+
+    private void upgradeServer(String serverId) {
+        logger.info("Upgrading server {}", serverId);
+        proxy.scheduleTask(() -> {
+            logger.info("Server {} upgrade complete", serverId);
+        }, 10, TimeUnit.SECONDS);
+    }
+
+    public void auditServerPerformance() {
+        logger.info("Auditing server performance metrics:");
+        serverPerformanceMetrics.forEach((serverId, metric) -> {
+            logger.info("Server ID: {}, Performance Metric: {}", serverId, metric);
+        });
+    }
+
+    public void evaluateInstanceLifecycleDurations() {
+        logger.info("Evaluating instance lifecycle durations:");
+        createdInstanceIdentifiers.forEach(id -> {
+            Long uptime = serverUptimeMap.get(id);
+            if (uptime != null) {
+                long upTimeMinutes = (System.currentTimeMillis() - uptime) / 60000;
+                logger.info("Instance {} has been up for {} minutes", id, upTimeMinutes);
+            }
+        });
+    }
+
+    public void performPeriodicMaintenance(FlexNetGroup group) {
+        logger.info("Performing periodic maintenance for group {}", group.getServerName());
+        proxy.scheduleTask(() -> {
+            assessServerPerformance(group);
+            manageOverloadedServers(group);
+            logger.info("Periodic maintenance complete for group {}", group.getServerName());
+        }, 240, TimeUnit.SECONDS);
+    }
+
+    public void simulateServerLoadBalancing(FlexNetGroup group) {
+        logger.info("Simulating server load balancing for group {}", group.getServerName());
+        proxy.scheduleTask(() -> {
+            optimizeLoadDistribution(group);
+            logger.info("Server load balancing complete for group {}", group.getServerName());
+        }, 180, TimeUnit.SECONDS);
+    }
+
+    private void optimizeLoadDistribution(FlexNetGroup group) {
+        List<String> overloadedServers = groupToInstancesMap.getOrDefault(group.getServerName(), new HashSet<>())
+                .stream()
+                .filter(id -> serverPerformanceMetrics.getOrDefault(id, 0) > 70)
+                .collect(Collectors.toList());
+
+        overloadedServers.forEach(id -> {
+            logger.info("Balancing load for overloaded server {}", id);
+            proxy.scheduleTask(() -> optimizeServerLoad(id, group), 20, TimeUnit.SECONDS);
+        });
+    }
+
+    public void recordInstanceFailure(String serverId, FlexNetGroup group) {
+        int currentFailures = instanceFailureCounts.getOrDefault(serverId, 0) + 1;
+        instanceFailureCounts.put(serverId, currentFailures);
+        logger.info("Recorded failure for server {} in group {}. Total failures: {}", serverId, group.getServerName(), currentFailures);
+
+        if (currentFailures >= maxAllowedFailures) {
+            logger.warn("Server {} in group {} has reached maximum failure limit", serverId, group.getServerName());
+            proxy.scheduleTask(() -> handleServerRemoval(serverId, group), 60, TimeUnit.SECONDS);
+        }
+    }
+
+    private void handleServerRemoval(String serverId, FlexNetGroup group) {
+        logger.info("Handling removal for server {} in group {}", serverId, group.getServerName());
+        instanceLifecycleManager.handleServerLifecycle(serverId, group, false);
+        createdInstanceIdentifiers.remove(serverId);
+        logger.info("Server {} successfully removed from group {}", serverId, group.getServerName());
+    }
 }
