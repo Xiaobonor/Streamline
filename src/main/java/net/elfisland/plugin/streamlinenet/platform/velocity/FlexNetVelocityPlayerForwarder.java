@@ -68,10 +68,22 @@ public class FlexNetVelocityPlayerForwarder {
                 event.setResult(ResultedEvent.ComponentResult.denied(
                         Component.text(locale.getInvalidHostname())
                 ));
+                logger.warn(
+                        "Player {} ({}) attempt to join the server with invalid VHost: {}",
+                        player.getGameProfile().getName(),
+                        player.getUniqueId(),
+                        address.getHostName()
+                );
             } else if (!groupManager.getGroupFromHost(address.getHostName()).canConnect()) {
                 event.setResult(ResultedEvent.ComponentResult.denied(
                         Component.text(locale.getNoServerAvailable())
                 ));
+                logger.warn(
+                        "Player {} ({}) attempt to join the server with no available server in group {}",
+                        player.getGameProfile().getName(),
+                        player.getUniqueId(),
+                        groupManager.getGroupFromHost(address.getHostName()).getId()
+                );
             } else {
                 playerHosts.put(player.getUniqueId(), address);
                 updatePlayerCount(address.getHostName(), true);
@@ -90,15 +102,45 @@ public class FlexNetVelocityPlayerForwarder {
         FlexNetGroup group = groupManager.getGroupFromHost(address.getHostName());
         RegisteredServer server = group.getLowestPlayerServer(false);
 
+        if (server == null) {
+            logger.warn("No available server found in group {} for player {} ({})",
+                    group.getId(), player.getGameProfile().getName(), player.getUniqueId());
+            return;
+        }
+
         event.setInitialServer(server);
 
         proxyServer.getEventManager().fireAndForget(new FlexNetVelocityPlayerForwardedEvent(player, group, server));
+        instanceController.adjustInstanceCountOnPlayerJoin(group);
 
         logger.info("Forwarded player {} ({}) to server {}",
                 player.getGameProfile().getName(),
                 player.getUniqueId(),
                 server.getServerInfo().getName()
         );
+    }
+
+    @Subscribe
+    public void onPlayerLeave(DisconnectEvent event) {
+        Player player = event.getPlayer();
+        Optional<InetSocketAddress> virtualHost = player.getVirtualHost();
+
+        if (!virtualHost.isPresent()) {
+            logger.warn("Player {} ({}) disconnected without a known VHost",
+                    player.getGameProfile().getName(), player.getUniqueId());
+            return;
+        }
+
+        InetSocketAddress address = virtualHost.get();
+        FlexNetGroup group = groupManager.getGroupFromHost(address.getHostName());
+
+        if (group != null) {
+            instanceController.adjustInstanceCountOnPlayerLeave(group);
+            updatePlayerCount(address.getHostName(), false);
+        }
+
+        loginTimestamps.remove(player.getUniqueId());
+        playerHosts.remove(player.getUniqueId());
     }
 
     private void updatePlayerCount(String hostname, boolean increment) {
@@ -143,5 +185,68 @@ public class FlexNetVelocityPlayerForwarder {
             player.disconnect(Component.text(locale.getLoginFailed()));
             logger.info("Player {} has been disconnected due to simulated login failure", player.getGameProfile().getName());
         }).delay(2, TimeUnit.SECONDS).schedule();
+    }
+
+    public void handleReconnect(Player player) {
+        UUID playerId = player.getUniqueId();
+        if (isPlayerConnected(playerId)) {
+            logger.info("Handling reconnect for player {}", player.getGameProfile().getName());
+            InetSocketAddress host = playerHosts.get(playerId);
+            if (host != null) {
+                FlexNetGroup group = groupManager.getGroupFromHost(host.getHostName());
+                if (group != null && group.canConnect()) {
+                    RegisteredServer server = group.getLowestPlayerServer(false);
+                    if (server != null) {
+                        player.createConnectionRequest(server).fireAndForget();
+                        logger.info("Player {} reconnected to server {}", player.getGameProfile().getName(), server.getServerInfo().getName());
+                    } else {
+                        logger.warn("No available server found for reconnecting player {}", player.getGameProfile().getName());
+                    }
+                } else {
+                    logger.warn("Group for reconnecting player {} is not available or cannot connect", player.getGameProfile().getName());
+                }
+            } else {
+                logger.warn("No known host for reconnecting player {}", player.getGameProfile().getName());
+            }
+        } else {
+            logger.warn("Reconnect attempt for non-connected player {}", player.getGameProfile().getName());
+        }
+    }
+
+    public void kickPlayer(Player player, String reason) {
+        logger.info("Kicking player {}: {}", player.getGameProfile().getName(), reason);
+        player.disconnect(Component.text(reason));
+        playerHosts.remove(player.getUniqueId());
+    }
+
+    public void checkIdlePlayers() {
+        long currentTime = System.currentTimeMillis();
+        for (UUID playerId : loginTimestamps.keySet()) {
+            long loginTime = loginTimestamps.get(playerId);
+            if (currentTime - loginTime > 3600000) { // 1 hour
+                Player player = proxyServer.getPlayer(playerId).orElse(null);
+                if (player != null) {
+                    kickPlayer(player, "Idle timeout exceeded");
+                    logger.info("Kicked idle player {}", player.getGameProfile().getName());
+                }
+            }
+        }
+    }
+
+    public void updateLocaleConfig(LocaleConfig newLocale) {
+        this.locale = newLocale;
+        logger.info("Locale configuration updated");
+    }
+
+    public void simulateServerLoad(String hostname) {
+        logger.warn("Simulating high server load for group {}", hostname);
+        proxyServer.getScheduler().buildTask(proxyServer, () -> {
+            logger.info("Server load simulation complete for group {}", hostname);
+        }).delay(5, TimeUnit.SECONDS).schedule();
+    }
+
+    public void logGroupServerStatus(String hostname) {
+        int count = getPlayerCount(hostname);
+        logger.info("Group {} has {} connected players", hostname, count);
     }
 }
