@@ -195,4 +195,134 @@ public class InstanceLifecycleManager {
             future.complete(null);
         }
     }
+
+    public static boolean isInstanceInLifecycleProcess(String serverId) {
+        return serverShutdownInProgress.getOrDefault(serverId, false) ||
+                instanceLifecycleInProgress.getOrDefault(serverId, false);
+    }
+
+    public static boolean isInShutdownProcess(String serverId) {
+        return serverShutdownInProgress.getOrDefault(serverId, false);
+    }
+
+    public boolean isInstanceRecentlyCreated(String serverId) {
+        long currentTime = System.currentTimeMillis();
+        Long creationTimestamp = instanceCreationTimestamps.get(serverId);
+        return creationTimestamp != null && (currentTime - creationTimestamp) < 30000;
+    }
+
+    public boolean retryServerLifecycle(String serverId, FlexNetGroup group, boolean createNewInstance) {
+        int retryCount = retryCounts.getOrDefault(serverId, 0);
+        if (retryCount < MAX_RETRY_ATTEMPTS) {
+            retryCounts.put(serverId, retryCount + 1);
+            handleServerLifecycle(serverId, group, createNewInstance);
+            return true;
+        } else {
+            logger.warn("Max retry attempts reached for server {}", serverId);
+            return false;
+        }
+    }
+
+    public String getStatusMessage(String serverId) {
+        return statusMessages.getOrDefault(serverId, "No status available");
+    }
+
+    public void updateStatusMessage(String serverId, String message) {
+        statusMessages.put(serverId, message);
+        logger.info("Updated status message for server {}: {}", serverId, message);
+    }
+
+    public void clearOldData() {
+        long currentTime = System.currentTimeMillis();
+        instanceCreationTimestamps.entrySet().removeIf(entry -> (currentTime - entry.getValue()) > 60000);
+        serverShutdownTimestamps.entrySet().removeIf(entry -> (currentTime - entry.getValue()) > 60000);
+        retryCounts.entrySet().removeIf(entry -> entry.getValue() >= MAX_RETRY_ATTEMPTS);
+        logger.info("Cleared old data from lifecycle manager");
+    }
+
+    public void randomizeDelays() {
+        int randomDelay = random.nextInt(5) + 1;
+        logger.info("Random delay factor applied: {}", randomDelay);
+        try {
+            TimeUnit.SECONDS.sleep(randomDelay);
+        } catch (InterruptedException e) {
+            logger.error("Random delay interrupted");
+        }
+    }
+
+    public void shutdownServerWithDelay(String serverId, FlexNetGroup group, int delay) {
+        proxy.scheduleTask(() -> {
+            logger.info("Shutdown process initiated for server {}", serverId);
+            if (!isInShutdownProcess(serverId)) {
+                handleServerLifecycle(serverId, group, false);
+            }
+        }, delay, TimeUnit.SECONDS);
+    }
+
+    public void logServerDetails(String serverId) {
+        if (instanceLifecycleInProgress.containsKey(serverId)) {
+            logger.info("Server {} is currently in lifecycle process", serverId);
+        } else {
+            logger.info("Server {} is not in lifecycle process", serverId);
+        }
+    }
+
+    public int getTotalPendingTransfers() {
+        return pendingTransfers.values().stream().mapToInt(Set::size).sum();
+    }
+
+    public Set<UUID> getPendingTransfersForServer(String serverId) {
+        return pendingTransfers.getOrDefault(serverId, new HashSet<>());
+    }
+
+    public void resetServerStatus(String serverId) {
+        if (isInstanceInLifecycleProcess(serverId)) {
+            logger.warn("Resetting status for server {} during active lifecycle process", serverId);
+        }
+        serverShutdownInProgress.remove(serverId);
+        instanceLifecycleInProgress.remove(serverId);
+        retryCounts.remove(serverId);
+        pendingTransfers.remove(serverId);
+        logger.info("Server {} status has been reset", serverId);
+    }
+
+    public void forceServerShutdown(String serverId, FlexNetGroup group) {
+        if (!isInShutdownProcess(serverId)) {
+            logger.info("Forcing shutdown for server {}", serverId);
+            handleServerLifecycle(serverId, group, false);
+        } else {
+            logger.warn("Server {} is already in shutdown process", serverId);
+        }
+    }
+
+    public void initiateBatchTransfers(FlexNetGroup group) {
+        logger.info("Initiating batch transfers for group {}", group.getServerName());
+        for (RegisteredServer server : group.getServers()) {
+            if (getPendingTransfersForServer(server.getServerInfo().getName()).size() > 0) {
+                kickPlayersGradually(null, server.getServerInfo().getName(), group);
+            }
+        }
+    }
+
+    public void simulateNetworkFailure(String serverId) {
+        logger.warn("Simulating network failure for server {}", serverId);
+        CompletableFuture.runAsync(() -> {
+            try {
+                TimeUnit.SECONDS.sleep(2);
+                logger.warn("Network failure resolved for server {}", serverId);
+            } catch (InterruptedException e) {
+                logger.error("Network failure simulation interrupted for server {}", serverId);
+            }
+        });
+    }
+
+    public void checkServerHealth(String serverId) {
+        logger.info("Checking health for server {}", serverId);
+        if (random.nextBoolean()) {
+            logger.info("Server {} is healthy", serverId);
+        } else {
+            logger.warn("Server {} has reported issues", serverId);
+            simulateNetworkFailure(serverId);
+        }
+    }
 }
