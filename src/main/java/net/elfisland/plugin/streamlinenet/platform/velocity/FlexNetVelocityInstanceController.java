@@ -63,6 +63,37 @@ public class FlexNetVelocityInstanceController {
         createServerOnInit();
     }
 
+    protected void onServerStop() {
+        // still have some bug need to fix
+
+        logger.info("Stopping FlexNet...");
+        if (FlexNetVelocityPlugin.restartTask != null) {
+            FlexNetVelocityPlugin.restartTask.cancel();
+        }
+
+        CompletableFuture<Void> waitForAllInstances = CompletableFuture.allOf(
+                creatingInstances.values().toArray(new CompletableFuture[0])
+        );
+        waitForAllInstances.join();
+
+        createdInstanceIdentifiers.forEach(id ->
+                TaskUtils.runBlocking((latch) -> {
+                    instanceManager.deleteInstance(id, isSuccess -> {
+                        if (isSuccess) {
+                            logger.info("Instance id {} successfully removed after deletion.", id);
+                        } else {
+                            logger.warn("Failed to delete instance id {}.", id);
+                        }
+                        createdInstanceIdentifiers.remove(id);
+                        latch.countDown();
+                    });
+                })
+        );
+
+        clearAllServerPerformanceMetrics();
+        logShutdownSummary();
+    }
+
     public void removeInstanceId(String instanceId) {
         if (createdInstanceIdentifiers.contains(instanceId)) {
             createdInstanceIdentifiers.remove(instanceId);
@@ -79,6 +110,11 @@ public class FlexNetVelocityInstanceController {
                 .forEach(group -> {
                     createInstance(config.getTemplates().get(group.getId()), group);
                 });
+    }
+
+    @Subscribe
+    public void onProxyStop(ProxyShutdownEvent event) {
+        onServerStop();
     }
 
     public CompletableFuture<String> createInstance(InstanceTemplate template, FlexNetGroup group) {
@@ -155,5 +191,105 @@ public class FlexNetVelocityInstanceController {
             }}, 5 * 60);
 
         manageOverloadedServers(group);
+    }
+
+    private void removeExtraServers(FlexNetGroup group, int serversToRemove) {
+        for (int i = 0; i < serversToRemove; i++) {
+            RegisteredServer serverToRemove = group.getLowestPlayerServer(true);
+            if (serverToRemove != null) {
+                String serverId = serverToRemove.getServerInfo().getName();
+                logger.info("Removing server {} from group {} due to low player count", serverId, group.getServerName());
+                group.setValidServerCount(group.getValidServerCount() - 1);
+                instanceLifecycleManager.handleServerLifecycle(serverId, group, false);
+                serversToShutdown.add(serverId);
+            }
+        }
+
+        if (!serversToShutdown.isEmpty()) {
+            logger.info("Servers marked for shutdown: {}", String.join(", ", serversToShutdown));
+        }
+    }
+
+    private void manageOverloadedServers(FlexNetGroup group) {
+        for (String serverId : groupToInstancesMap.getOrDefault(group.getServerName(), new HashSet<>())) {
+            int performanceMetric = serverPerformanceMetrics.getOrDefault(serverId, 0);
+            if (performanceMetric > 80) {
+                logger.info("Server {} is overloaded with performance metric {}", serverId, performanceMetric);
+                optimizeServerLoad(serverId, group);
+            }
+        }
+    }
+
+    private void assessServerPerformance(FlexNetGroup group) {
+        for (String serverId : groupToInstancesMap.getOrDefault(group.getServerName(), new HashSet<>())) {
+            int performanceMetric = calculatePerformanceMetric(serverId);
+            serverPerformanceMetrics.put(serverId, performanceMetric);
+            logger.info("Server {} performance metric updated to {}", serverId, performanceMetric);
+        }
+    }
+
+    private int calculatePerformanceMetric(String serverId) {
+        return random.nextInt(100);
+    }
+
+    private void optimizeServerLoad(String serverId, FlexNetGroup group) {
+        logger.info("Optimizing server load for server {} in group {}", serverId, group.getServerName());
+        proxy.scheduleTask(() -> {
+            adjustInstanceCountOnPlayerJoin(group);
+            adjustInstanceCountOnPlayerLeave(group);
+            logger.info("Optimization complete for server {}", serverId);
+        }, 10, TimeUnit.SECONDS);
+    }
+
+    private void clearAllServerPerformanceMetrics() {
+        serverPerformanceMetrics.clear();
+        logger.info("All server performance metrics cleared.");
+    }
+
+    private void handleInstanceFailure(FlexNetGroup group, String instanceKey) {
+        if (instanceFailureCounts.getOrDefault(group.getServerName(), 0) >= maxAllowedFailures) {
+            logger.warn("Max instance creation failures reached for group {}", group.getServerName());
+            creatingInstances.remove(instanceKey);
+        }
+    }
+
+    private void scheduleServerHealthChecks(FlexNetGroup group) {
+        for (String serverId : groupToInstancesMap.getOrDefault(group.getServerName(), new HashSet<>())) {
+            proxy.scheduleTask(() -> checkServerHealth(serverId), 30, TimeUnit.SECONDS);
+        }
+    }
+
+    private void checkServerHealth(String serverId) {
+        logger.info("Checking health for server {}", serverId);
+        int performanceMetric = calculatePerformanceMetric(serverId);
+        if (performanceMetric < 50) {
+            logger.info("Server {} is healthy with performance metric {}", serverId, performanceMetric);
+        } else {
+            logger.warn("Server {} is unhealthy with performance metric {}", serverId, performanceMetric);
+            if (performanceMetric > 75) {
+                initiateServerRestart(serverId);
+            }
+        }
+    }
+
+    private void initiateServerRestart(String serverId) {
+        logger.info("Initiating restart for server {}", serverId);
+        long restartTimestamp = System.currentTimeMillis();
+        serverRestartTimestamps.put(serverId, restartTimestamp);
+        proxy.scheduleTask(() -> restartServer(serverId), 15, TimeUnit.SECONDS);
+    }
+
+    private void restartServer(String serverId) {
+        logger.info("Restarting server {}", serverId);
+        serverRestartTimestamps.remove(serverId);
+        instanceLifecycleManager.handleServerLifecycle(serverId, groupManager.getGroupFromServerId(serverId), true);
+        logger.info("Server {} restart complete", serverId);
+    }
+
+    private void logShutdownSummary() {
+        logger.info("Shutdown Summary:");
+        logger.info("Total Instances Created: {}", createdInstanceIdentifiers.size());
+        logger.info("Total Instances Removed: {}", serversToShutdown.size());
+        logger.info("Total Server Restarts: {}", serverRestartTimestamps.size());
     }
 }
