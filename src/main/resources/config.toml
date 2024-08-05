@@ -1,0 +1,78 @@
+# todo:
+# 1. 修復無伺服器可加入問題 (TO CONFIRM)
+# 2. 記憶體佔用高
+# 3. 離開刪服問題
+# 4. 關閉後刪服問題
+
+[pterodactyl]
+apiUrl = "http://192.168.31.100"
+apiKey = ""
+clientApiKey = ""
+allocationAliasPrefix = "dynamic-"
+
+[locale]
+invalidHostname = "Invalid hostname"
+failedToConnect = "Connection to the main server could not be established"
+noServerAvailable = "No server available"
+#Use {1}[(click message)] to add a clickable message (must be in the end)
+serverTransferWarning = "Server will restart in {0} seconds. Please move to the new server. {1}[Click here to join!]"
+joinNewCommandUsage = "Usage: /JoinNew <groupName> <serverId>"
+joinNewServerNotFound = "Server not found: {0}"
+joinNewGroupNotFound = "Group not found: {0}"
+joinNewServerRestarting = "You can't join in {0} Server is restarting."
+playerInServerMessage = "You are already in a server ({0})"
+
+[groups]
+    [groups.survival]
+    fromHostname = "survival.elfisland.net"
+    serverName = "survival"
+    hubServer = "hub" #Recommend to use NanoLimbo
+    maxInstance = 3
+    playerAmountToCreateInstance = 25
+    #Restart every few minutes (->execute restart task and start reminder)
+    autoRestartInterval = 1440
+    #Reminder of how many seconds until kicking (not included in autoRestartInterval)
+    transferWarningIntervals = [1800, 900, 600, 300, 240, 180, 120, 60, 30, 15, 10, 5, 4, 3, 2, 1]
+    #After kicking the player, wait a few minutes before closing the server (not included in autoRestartInterval)
+    postShutdownWait = 3
+[groups.island]
+    fromHostname = "island.elfisland.net"
+    serverName = "island"
+    hubServer = "hub"
+    maxInstance = 3
+    playerAmountToCreateInstance = 50
+    autoRestartInterval = 1440
+    transferWarningIntervals = [1800, 900, 600, 300, 240, 180, 120, 60, 30, 15, 10, 5, 4, 3, 2, 1]
+    postShutdownWait = 3
+
+[templates]
+    [templates.survival]
+    serverOnlineDelay = 5
+    nameTemplate = "[StreamlineNet] Survival Node"
+    description = "Multi-Paper Worker"
+    dockerImage = "ghcr.io/pterodactyl/yolks:java_17"
+    locationId = 1
+    nestId = 1
+    eggId = 15
+    defaultOwnerId = 1
+    cpuAmount = 200
+    memoryAmount = 2048
+    diskAmount = 5120
+    skipInitScript = false
+        [templates.survival.environmentValues]
+        SERVER_JARFILE = "server.jar"
+    [templates.island]
+    serverOnlineDelay = 5
+    nameTemplate = "[StreamlineNet] Island Node"
+    description = "Paper"
+    dockerImage = "ghcr.io/pterodactyl/yolks:java_17"
+    locationId = 1
+    nestId = 1
+    eggId = 16
+    defaultOwnerId = 1
+    cpuAmount = 200
+    memoryAmount = 2048
+    diskAmount = 5120
+    skipInitScript = false
+    [templates.survival.environmentValues]
+    SERVER_JARFILE = "server.jar"
