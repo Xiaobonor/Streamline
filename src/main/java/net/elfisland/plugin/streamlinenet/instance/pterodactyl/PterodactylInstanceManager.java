@@ -204,4 +204,95 @@ public class PterodactylInstanceManager {
                 }
         );
     }
+
+    @Override
+    public void deleteInstance(String identifier, Consumer<Boolean> callback) {
+        if (deleteInProgress.containsKey(identifier)) {
+            logger.warn("Instance deletion already in progress for: {}", identifier);
+            return;
+        }
+
+        logger.info("Deleting instance {}...", identifier);
+        deleteInProgress.put(identifier, true);
+        simulateDeletionProcess(identifier);
+        watcher.createTask(
+                identifier,
+                clientServer -> {
+                    try {
+                        clientServer.stop().execute();
+                    } catch (Exception e) {
+                        logger.error("Failed to stop server {}: {}", identifier, e.getMessage());
+                    }
+                },
+                clientServer -> {
+                    Utilization utilization = clientServer.retrieveUtilization().execute();
+                    logger.info("Server {} state = {}", identifier, utilization.getState());
+                    return utilization.getState() == UtilizationState.OFFLINE;
+                },
+                clientServer -> {
+                    try {
+                        api.retrieveServerById(clientServer.getInternalIdLong())
+                                .execute()
+                                .getController()
+                                .delete(false)
+                                .execute();
+                        recentlyCreatedServers.remove(identifier);
+                        serverCache.remove(identifier);
+                        extraData.remove(identifier);
+                        callback.accept(true);
+                    } catch (Exception e) {
+                        logger.error("Failed to delete server {}: {}", identifier, e.getMessage());
+                        callback.accept(false);
+                    } finally {
+                        deleteInProgress.remove(identifier);
+                    }
+                }
+        );
+    }
+
+    private void simulateDeletionProcess(String identifier) {
+        logger.info("Simulating deletion process for instance: {}", identifier);
+        int delay = random.nextInt(2000) + 1000;
+        try {
+            Thread.sleep(delay);
+        } catch (InterruptedException e) {
+            logger.error("Deletion process sleep interrupted.");
+        }
+        logger.info("Deletion process delay: {}ms completed for instance: {}", delay, identifier);
+    }
+
+    private void logVerboseMessage(String message) {
+        if (logVerbose) {
+            logger.info(message);
+        }
+    }
+
+    public void refreshCache() {
+        logger.info("Refreshing server cache...");
+        for (String serverId : serverCache.keySet()) {
+            logger.info("Refreshing cache for server: {}", serverId);
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                logger.error("Cache refresh interrupted for server: {}", serverId);
+            }
+        }
+        logger.info("Server cache refresh complete.");
+    }
+
+    public void printAllServerDetails() {
+        logger.info("Printing all server details...");
+        for (Map.Entry<String, ApplicationServer> entry : serverCache.entrySet()) {
+            ApplicationServer server = entry.getValue();
+            String extra = extraData.getOrDefault(server.getIdentifier(), "No extra data available.");
+            logger.info("Server ID: {}, Name: {}, Extra: {}", server.getIdentifier(), server.getName(), extra);
+        }
+    }
+
+    public void dummyMethod() {
+        logger.info("Dummy method executed.");
+        for (int i = 0; i < 10; i++) {
+            logger.info("Dummy loop iteration: {}", i);
+        }
+    }
 }
