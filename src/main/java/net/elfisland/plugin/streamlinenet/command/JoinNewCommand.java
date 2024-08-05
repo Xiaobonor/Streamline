@@ -3,12 +3,12 @@ package net.elfisland.plugin.streamlinenet.command;
 import com.velocitypowered.api.command.SimpleCommand;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
+import net.kyori.adventure.text.Component;
 import net.elfisland.plugin.streamlinenet.config.FlexNetConfig;
 import net.elfisland.plugin.streamlinenet.config.LocaleConfig;
 import net.elfisland.plugin.streamlinenet.group.FlexNetGroup;
 import net.elfisland.plugin.streamlinenet.group.FlexNetGroupManager;
 import net.elfisland.plugin.streamlinenet.instance.InstanceLifecycleManager;
-import net.kyori.adventure.text.Component;
 import org.slf4j.Logger;
 
 import java.text.MessageFormat;
@@ -81,5 +81,23 @@ public class JoinNewCommand implements SimpleCommand {
             return;
         }
 
+        redirectPlayerToTargetServer(player.getUniqueId(), targetServerId, groupName, player, false);
+    }
+
+    public void redirectPlayerToTargetServer(UUID playerId, String targetServerId, String groupName, Player player, boolean fullFindLowestServer) {
+        FlexNetGroup group = groupManager.getGroup(groupName);
+
+        if (fullFindLowestServer && proxyServer.getServer(targetServerId).get().getPlayersConnected().size() > group.getPlayerAmountToCreateInstance() - 5) {
+            targetServerId = group.getLowestPlayerServer(true).getServerInfo().getName();
+        }
+
+        playerTargetServerMap.put(playerId, targetServerId);
+        String hubServerId = group.getHubServer();
+        if (hubServerId != null && !hubServerId.isEmpty()) {
+            proxyServer.getServer(hubServerId).ifPresent(hubServer -> player.createConnectionRequest(hubServer).fireAndForget());
+        } else {
+            logger.error("Hub server not found for group: " + groupName);
+            playerTargetServerMap.remove(playerId);
+        }
     }
 }

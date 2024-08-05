@@ -4,6 +4,7 @@ import com.velocitypowered.api.proxy.server.RegisteredServer;
 import lombok.Builder;
 import lombok.Getter;
 import lombok.Setter;
+import net.elfisland.plugin.streamlinenet.instance.InstanceLifecycleManager;
 
 import java.util.*;
 
@@ -63,5 +64,47 @@ public class FlexNetGroup {
     public int getServerAmount() {
         return serverMap.size();
     }
+
+    // The boolean parameter is to detect the server in the process of InstanceLifecycleManager or only detect shutdown?
+    public RegisteredServer getLowestPlayerServer(boolean needDetectIsInLifecycleProgress) {
+        if (needDetectIsInLifecycleProgress) {
+            return serverMap.entrySet().stream()
+                    .filter(entry -> !InstanceLifecycleManager.isInstanceInLifecycleProcess(entry.getKey()))
+                    .min(Comparator.comparingInt(entry -> entry.getValue().getPlayersConnected().size()))
+                    .map(Map.Entry::getValue)
+                    .orElse(null);
+        } else {
+            return serverMap.entrySet().stream()
+                    .filter(entry -> !InstanceLifecycleManager.isInShutdownProcess(entry.getKey()))
+                    .min(Comparator.comparingInt(entry -> entry.getValue().getPlayersConnected().size()))
+                    .map(Map.Entry::getValue)
+                    .orElse(null);
+        }
+    }
+
+    public int getAllPlayersCount() {
+        return serverMap.values().stream()
+                .filter(Objects::nonNull)
+                .mapToInt(server -> server.getPlayersConnected().size())
+                .sum() + 1;
+    }
+
+    public boolean canCreateInstance() {
+        return validServerCount < maxInstance &&
+                (validServerCount == 0 || (getAllPlayersCount() / validServerCount) >= playerAmountToCreateInstance);
+    }
+
+    public boolean needDeleteInstance() {
+        return validServerCount > 1 && (getAllPlayersCount() / validServerCount) < playerAmountToCreateInstance;
+    }
+
+    public int calculateRequiredServers() {
+        return (int) Math.ceil((double) getAllPlayersCount() / playerAmountToCreateInstance);
+    }
+
+    public boolean canConnect() {
+        return !serverMap.isEmpty();
+    }
+
 
 }
