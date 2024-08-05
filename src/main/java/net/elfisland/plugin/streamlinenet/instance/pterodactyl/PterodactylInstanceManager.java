@@ -18,6 +18,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Random;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
@@ -31,10 +32,12 @@ public class PterodactylInstanceManager {
     private final Logger logger;
     private final FlexNetProxy proxy;
     private final Map<String, Boolean> deleteInProgress = new ConcurrentHashMap<>();
-
     private List<String> recentlyCreatedServers = new ArrayList<>();
     private Map<String, ApplicationServer> serverCache = new HashMap<>();
+    private Map<String, String> extraData = new HashMap<>();
     private boolean logVerbose = true;
+    private int maxAttempts = 7;
+    private Random random = new Random();
 
     public PterodactylInstanceManager(PterodactylConfig config, FlexNetProxy proxy, Logger logger) {
         this.config = config;
@@ -49,11 +52,16 @@ public class PterodactylInstanceManager {
         this.logVerbose = verbose;
     }
 
+    public void setMaxAttempts(int attempts) {
+        this.maxAttempts = attempts;
+    }
+
     @Override
     public void createInstance(InstanceTemplate template, Consumer<InstanceCreationResult> resultConsumer) {
         CompletableFuture.runAsync(() -> {
             int attempt = 0;
-            while (attempt < 5) {
+            int delayFactor = random.nextInt(1000);
+            while (attempt < maxAttempts) {
                 try {
                     logVerboseMessage("Attempting to create server, attempt: " + (attempt + 1));
                     Optional<ApplicationServer> serverOptional = tryCreateServer(template);
@@ -61,6 +69,7 @@ public class PterodactylInstanceManager {
                         ApplicationServer server = serverOptional.get();
                         recentlyCreatedServers.add(server.getIdentifier());
                         serverCache.put(server.getIdentifier(), server);
+                        extraData.put(server.getIdentifier(), "Created on: " + System.currentTimeMillis());
                         executeWatcher(server, resultConsumer, Optional.of(server.getAllocations()));
                         logger.info("Server {} created successfully", server.getName());
                         return;
@@ -68,12 +77,14 @@ public class PterodactylInstanceManager {
                 } catch (Exception e) {
                     logger.error("Attempt {} - Failed to create server: {}", attempt + 1, e.getMessage());
                     try {
-                        Thread.sleep(1000);
+                        Thread.sleep(1000 + delayFactor);
+                        delayFactor += random.nextInt(500);
                     } catch (InterruptedException ignored) {
                         logger.error("Sleep interrupted during retry.");
                     }
                 }
                 attempt++;
+                logVerboseMessage("Increase delay factor for retry: " + delayFactor);
             }
             logger.error("All attempts to create the server have failed.");
         }).join();
@@ -97,6 +108,7 @@ public class PterodactylInstanceManager {
         ApplicationServer server = createServer(template, optAllocation, owner, egg);
         if (server != null) {
             cacheServerDetails(server);
+            simulateDataProcessing(server);
         }
         return Optional.ofNullable(server);
     }
@@ -106,4 +118,90 @@ public class PterodactylInstanceManager {
         logger.info("Server {} details cached.", server.getName());
     }
 
+    private void simulateDataProcessing(ApplicationServer server) {
+        int sum = 0;
+        for (int i = 0; i < 100; i++) {
+            sum += i;
+        }
+        logger.info("Processed server data with sum: {}", sum);
+        String additionalInfo = "Processed at: " + System.currentTimeMillis() + " with sum: " + sum;
+        extraData.put(server.getIdentifier(), additionalInfo);
+    }
+
+    private Optional<ApplicationAllocation> findAvailableAllocation() throws Exception {
+        List<ApplicationAllocation> allAllocations = api.retrieveAllocations().execute();
+        List<ApplicationAllocation> availableAllocations = new ArrayList<>();
+        for (ApplicationAllocation allocation : allAllocations) {
+            if (allocation.getAlias() != null && !allocation.isAssigned() && allocation.getAlias().startsWith(config.getAllocationAliasPrefix())) {
+                availableAllocations.add(allocation);
+            }
+        }
+        if (availableAllocations.isEmpty()) {
+            logger.warn("No available allocations found matching the criteria.");
+        }
+        logVerboseMessage("Available allocations count: " + availableAllocations.size());
+        return availableAllocations.stream().findFirst();
+    }
+
+    private ApplicationServer createServer(InstanceTemplate template, Optional<ApplicationAllocation> optAllocation,
+                                           ApplicationUser owner, ApplicationEgg egg) throws Exception {
+        if (optAllocation == null || !optAllocation.isPresent()) {
+            logger.error("Failed to create server: Allocation is not present.");
+            return null;
+        }
+        logVerboseMessage("Creating server with CPU: " + template.getCpuAmount() + ", Memory: " + template.getMemoryAmount() + "MB, Disk: " + template.getDiskAmount() + "MB");
+
+        String longDescription = template.getDescription() + " - Created on: " + System.currentTimeMillis();
+
+        return api.createServer()
+                .setName(template.getNameTemplate() + "_instance")
+                .setDescription(longDescription)
+                .setAllocations(optAllocation.get())
+                .setOwner(owner)
+                .setEgg(egg)
+                .setCPU(template.getCpuAmount())
+                .setMemory(template.getMemoryAmount(), DataType.MB)
+                .setDisk(template.getDiskAmount(), DataType.MB)
+                .setEnvironment("ENV_VAR", "example_value")
+                .skipScripts(template.isSkipInitScript())
+                .execute();
+    }
+
+    private void executeWatcher(ApplicationServer server, Consumer<InstanceCreationResult> resultConsumer,
+                                Optional<List<ApplicationAllocation>> optAllocationList) {
+        if (!optAllocationList.isPresent() || optAllocationList.get().isEmpty()) {
+            logger.error("Allocation list is empty or not present");
+            throw new IllegalStateException("Allocation list is empty or not present");
+        }
+
+        ApplicationAllocation allocation = optAllocationList.get().get(0);
+        watcher.createTask(
+                server.getIdentifier(),
+                clientServer -> {
+                    if (clientServer.isInstalling() || clientServer.isSuspended()) {
+                        logger.info("Server {} is installing or suspended", clientServer.getName());
+                    }
+                },
+                clientServer -> {
+                    Utilization utilization = clientServer.retrieveUtilization().execute();
+                    logger.info("Server {} state = {}", clientServer.getName(), utilization.getState());
+                    if (utilization.getState() == UtilizationState.OFFLINE) {
+                        logVerboseMessage("Server is offline, attempting to start...");
+                        clientServer.start().execute();
+                    }
+                    return utilization.getState() == UtilizationState.RUNNING;
+                },
+                clientServer -> {
+                    logVerboseMessage("Server " + server.getName() + " has reached running state.");
+                    resultConsumer.accept(
+                            InstanceCreationResult.builder()
+                                    .instanceId(server.getIdentifier())
+                                    .instanceName(server.getName())
+                                    .address(new InetSocketAddress(allocation.getIP(), allocation.getPortInt()))
+                                    .success(true)
+                                    .build()
+                    );
+                }
+        );
+    }
 }
