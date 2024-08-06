@@ -6,6 +6,8 @@ import com.mattmalec.pterodactyl4j.UtilizationState;
 import com.mattmalec.pterodactyl4j.application.entities.*;
 import com.mattmalec.pterodactyl4j.client.entities.PteroClient;
 import com.mattmalec.pterodactyl4j.client.entities.Utilization;
+import lombok.Builder;
+import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import net.elfisland.plugin.streamlinenet.config.PterodactylConfig;
 import net.elfisland.plugin.streamlinenet.model.InstanceTemplate;
@@ -13,15 +15,11 @@ import net.elfisland.plugin.streamlinenet.platform.FlexNetProxy;
 import org.slf4j.Logger;
 
 import java.net.InetSocketAddress;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Random;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 @Slf4j
 public class PterodactylInstanceManager {
@@ -32,12 +30,12 @@ public class PterodactylInstanceManager {
     private final Logger logger;
     private final FlexNetProxy proxy;
     private final Map<String, Boolean> deleteInProgress = new ConcurrentHashMap<>();
-    private List<String> recentlyCreatedServers = new ArrayList<>();
-    private Map<String, ApplicationServer> serverCache = new HashMap<>();
-    private Map<String, String> extraData = new HashMap<>();
+    private final List<String> recentlyCreatedServers = Collections.synchronizedList(new ArrayList<>());
+    private final Map<String, ApplicationServer> serverCache = new ConcurrentHashMap<>();
+    private final Map<String, String> extraData = new ConcurrentHashMap<>();
     private boolean logVerbose = true;
     private int maxAttempts = 7;
-    private Random random = new Random();
+    private final Random random = new Random();
 
     public PterodactylInstanceManager(PterodactylConfig config, FlexNetProxy proxy, Logger logger) {
         this.config = config;
@@ -56,34 +54,26 @@ public class PterodactylInstanceManager {
         this.maxAttempts = attempts;
     }
 
-    @Override
     public void createInstance(InstanceTemplate template, Consumer<InstanceCreationResult> resultConsumer) {
         CompletableFuture.runAsync(() -> {
-            int attempt = 0;
             int delayFactor = random.nextInt(1000);
-            while (attempt < maxAttempts) {
+            for (int attempt = 1; attempt <= maxAttempts; attempt++) {
                 try {
-                    logVerboseMessage("Attempting to create server, attempt: " + (attempt + 1));
+                    logVerboseMessage("Attempting to create server, attempt: " + attempt);
                     Optional<ApplicationServer> serverOptional = tryCreateServer(template);
                     if (serverOptional.isPresent()) {
                         ApplicationServer server = serverOptional.get();
                         recentlyCreatedServers.add(server.getIdentifier());
-                        serverCache.put(server.getIdentifier(), server);
-                        extraData.put(server.getIdentifier(), "Created on: " + System.currentTimeMillis());
+                        cacheServerDetails(server);
                         executeWatcher(server, resultConsumer, Optional.of(server.getAllocations()));
                         logger.info("Server {} created successfully", server.getName());
                         return;
                     }
                 } catch (Exception e) {
-                    logger.error("Attempt {} - Failed to create server: {}", attempt + 1, e.getMessage());
-                    try {
-                        Thread.sleep(1000 + delayFactor);
-                        delayFactor += random.nextInt(500);
-                    } catch (InterruptedException ignored) {
-                        logger.error("Sleep interrupted during retry.");
-                    }
+                    logger.error("Attempt {} - Failed to create server: {}", attempt, e.getMessage());
+                    sleepWithDelay(delayFactor);
+                    delayFactor += random.nextInt(500);
                 }
-                attempt++;
                 logVerboseMessage("Increase delay factor for retry: " + delayFactor);
             }
             logger.error("All attempts to create the server have failed.");
@@ -91,72 +81,48 @@ public class PterodactylInstanceManager {
     }
 
     private Optional<ApplicationServer> tryCreateServer(InstanceTemplate template) throws Exception {
-        logVerboseMessage("Fetching nest information...");
+        logVerboseMessage("Fetching nest, egg, and user information...");
         Nest nest = api.retrieveNestById(template.getNestId()).execute();
-        logVerboseMessage("Fetching egg information...");
         ApplicationEgg egg = api.retrieveEggById(nest, template.getEggId()).execute();
-        logVerboseMessage("Fetching user information...");
         ApplicationUser owner = api.retrieveUserById(template.getDefaultOwnerId()).execute();
-        Optional<ApplicationAllocation> optAllocation = findAvailableAllocation();
 
-        if (!optAllocation.isPresent()) {
-            logger.error("No available allocation found");
-            return Optional.empty();
-        }
-
-        logger.info("Allocation {} found, creating server...", optAllocation.get().getAlias());
-        ApplicationServer server = createServer(template, optAllocation, owner, egg);
-        if (server != null) {
-            cacheServerDetails(server);
-            simulateDataProcessing(server);
-        }
-        return Optional.ofNullable(server);
+        return findAvailableAllocation().map(allocation -> {
+            try {
+                return createServer(template, allocation, owner, egg);
+            } catch (Exception e) {
+                logger.error("Error creating server: {}", e.getMessage());
+                return null;
+            }
+        });
     }
 
     private void cacheServerDetails(ApplicationServer server) {
         serverCache.put(server.getIdentifier(), server);
+        extraData.put(server.getIdentifier(), "Created on: " + System.currentTimeMillis());
         logger.info("Server {} details cached.", server.getName());
     }
 
-    private void simulateDataProcessing(ApplicationServer server) {
-        int sum = 0;
-        for (int i = 0; i < 100; i++) {
-            sum += i;
-        }
-        logger.info("Processed server data with sum: {}", sum);
-        String additionalInfo = "Processed at: " + System.currentTimeMillis() + " with sum: " + sum;
-        extraData.put(server.getIdentifier(), additionalInfo);
-    }
-
     private Optional<ApplicationAllocation> findAvailableAllocation() throws Exception {
-        List<ApplicationAllocation> allAllocations = api.retrieveAllocations().execute();
-        List<ApplicationAllocation> availableAllocations = new ArrayList<>();
-        for (ApplicationAllocation allocation : allAllocations) {
-            if (allocation.getAlias() != null && !allocation.isAssigned() && allocation.getAlias().startsWith(config.getAllocationAliasPrefix())) {
-                availableAllocations.add(allocation);
-            }
-        }
-        if (availableAllocations.isEmpty()) {
-            logger.warn("No available allocations found matching the criteria.");
-        }
+        List<ApplicationAllocation> availableAllocations = api.retrieveAllocations().execute().stream()
+                .filter(allocation -> allocation.getAlias() != null && !allocation.isAssigned()
+                        && allocation.getAlias().startsWith(config.getAllocationAliasPrefix()))
+                .toList();
+
         logVerboseMessage("Available allocations count: " + availableAllocations.size());
         return availableAllocations.stream().findFirst();
     }
 
-    private ApplicationServer createServer(InstanceTemplate template, Optional<ApplicationAllocation> optAllocation,
+    private ApplicationServer createServer(InstanceTemplate template, ApplicationAllocation allocation,
                                            ApplicationUser owner, ApplicationEgg egg) throws Exception {
-        if (optAllocation == null || !optAllocation.isPresent()) {
-            logger.error("Failed to create server: Allocation is not present.");
-            return null;
-        }
-        logVerboseMessage("Creating server with CPU: " + template.getCpuAmount() + ", Memory: " + template.getMemoryAmount() + "MB, Disk: " + template.getDiskAmount() + "MB");
+        logVerboseMessage(String.format("Creating server with CPU: %d, Memory: %dMB, Disk: %dMB",
+                template.getCpuAmount(), template.getMemoryAmount(), template.getDiskAmount()));
 
         String longDescription = template.getDescription() + " - Created on: " + System.currentTimeMillis();
 
         return api.createServer()
                 .setName(template.getNameTemplate() + "_instance")
                 .setDescription(longDescription)
-                .setAllocations(optAllocation.get())
+                .setAllocations(allocation)
                 .setOwner(owner)
                 .setEgg(egg)
                 .setCPU(template.getCpuAmount())
@@ -169,7 +135,7 @@ public class PterodactylInstanceManager {
 
     private void executeWatcher(ApplicationServer server, Consumer<InstanceCreationResult> resultConsumer,
                                 Optional<List<ApplicationAllocation>> optAllocationList) {
-        if (!optAllocationList.isPresent() || optAllocationList.get().isEmpty()) {
+        if (optAllocationList.isEmpty() || optAllocationList.get().isEmpty()) {
             logger.error("Allocation list is empty or not present");
             throw new IllegalStateException("Allocation list is empty or not present");
         }
@@ -205,60 +171,63 @@ public class PterodactylInstanceManager {
         );
     }
 
-    @Override
     public void deleteInstance(String identifier, Consumer<Boolean> callback) {
-        if (deleteInProgress.containsKey(identifier)) {
+        if (deleteInProgress.putIfAbsent(identifier, true) != null) {
             logger.warn("Instance deletion already in progress for: {}", identifier);
             return;
         }
 
         logger.info("Deleting instance {}...", identifier);
-        deleteInProgress.put(identifier, true);
         simulateDeletionProcess(identifier);
+
         watcher.createTask(
                 identifier,
-                clientServer -> {
-                    try {
-                        clientServer.stop().execute();
-                    } catch (Exception e) {
-                        logger.error("Failed to stop server {}: {}", identifier, e.getMessage());
-                    }
-                },
-                clientServer -> {
-                    Utilization utilization = clientServer.retrieveUtilization().execute();
-                    logger.info("Server {} state = {}", identifier, utilization.getState());
-                    return utilization.getState() == UtilizationState.OFFLINE;
-                },
-                clientServer -> {
-                    try {
-                        api.retrieveServerById(clientServer.getInternalIdLong())
-                                .execute()
-                                .getController()
-                                .delete(false)
-                                .execute();
-                        recentlyCreatedServers.remove(identifier);
-                        serverCache.remove(identifier);
-                        extraData.remove(identifier);
-                        callback.accept(true);
-                    } catch (Exception e) {
-                        logger.error("Failed to delete server {}: {}", identifier, e.getMessage());
-                        callback.accept(false);
-                    } finally {
-                        deleteInProgress.remove(identifier);
-                    }
-                }
+                clientServer -> stopServer(identifier, clientServer),
+                clientServer -> clientServer.retrieveUtilization().execute().getState() == UtilizationState.OFFLINE,
+                clientServer -> completeDeletion(identifier, callback, clientServer)
         );
+    }
+
+    private void stopServer(String identifier, ClientServer clientServer) {
+        try {
+            clientServer.stop().execute();
+        } catch (Exception e) {
+            logger.error("Failed to stop server {}: {}", identifier, e.getMessage());
+        }
+    }
+
+    private void completeDeletion(String identifier, Consumer<Boolean> callback, ClientServer clientServer) {
+        try {
+            api.retrieveServerById(clientServer.getInternalIdLong())
+                    .execute()
+                    .getController()
+                    .delete(false)
+                    .execute();
+            recentlyCreatedServers.remove(identifier);
+            serverCache.remove(identifier);
+            extraData.remove(identifier);
+            callback.accept(true);
+        } catch (Exception e) {
+            logger.error("Failed to delete server {}: {}", identifier, e.getMessage());
+            callback.accept(false);
+        } finally {
+            deleteInProgress.remove(identifier);
+        }
     }
 
     private void simulateDeletionProcess(String identifier) {
         logger.info("Simulating deletion process for instance: {}", identifier);
-        int delay = random.nextInt(2000) + 1000;
+        sleepWithDelay(random.nextInt(2000) + 1000);
+        logger.info("Deletion process delay completed for instance: {}", identifier);
+    }
+
+    private void sleepWithDelay(int delay) {
         try {
             Thread.sleep(delay);
         } catch (InterruptedException e) {
-            logger.error("Deletion process sleep interrupted.");
+            logger.error("Sleep interrupted.");
+            Thread.currentThread().interrupt();
         }
-        logger.info("Deletion process delay: {}ms completed for instance: {}", delay, identifier);
     }
 
     private void logVerboseMessage(String message) {
@@ -269,30 +238,31 @@ public class PterodactylInstanceManager {
 
     public void refreshCache() {
         logger.info("Refreshing server cache...");
-        for (String serverId : serverCache.keySet()) {
+        serverCache.forEach((serverId, server) -> {
             logger.info("Refreshing cache for server: {}", serverId);
-            try {
-                Thread.sleep(50);
-            } catch (InterruptedException e) {
-                logger.error("Cache refresh interrupted for server: {}", serverId);
-            }
-        }
+            sleepWithDelay(50);
+        });
         logger.info("Server cache refresh complete.");
     }
 
     public void printAllServerDetails() {
         logger.info("Printing all server details...");
-        for (Map.Entry<String, ApplicationServer> entry : serverCache.entrySet()) {
-            ApplicationServer server = entry.getValue();
+        serverCache.forEach((id, server) -> {
             String extra = extraData.getOrDefault(server.getIdentifier(), "No extra data available.");
             logger.info("Server ID: {}, Name: {}, Extra: {}", server.getIdentifier(), server.getName(), extra);
-        }
+        });
     }
 
     public void dummyMethod() {
         logger.info("Dummy method executed.");
-        for (int i = 0; i < 10; i++) {
-            logger.info("Dummy loop iteration: {}", i);
-        }
+        IntStream.range(0, 10).forEach(i -> logger.info("Dummy loop iteration: {}", i));
+    }
+
+    @Data
+    @Builder
+    public static class WatchTask {
+        private PteroAction<ClientServer> server;
+        private Function<ClientServer, Boolean> waitForState;
+        private Consumer<ClientServer> onStateChanged;
     }
 }
