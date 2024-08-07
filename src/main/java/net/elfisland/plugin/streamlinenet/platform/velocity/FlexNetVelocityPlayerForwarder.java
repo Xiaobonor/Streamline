@@ -29,6 +29,7 @@ public class FlexNetVelocityInstanceController {
     private InstanceLifecycleManager instanceLifecycleManager;
     private final Logger logger;
 
+    // Use ConcurrentHashMap to manage concurrent access safely
     private final Map<String, ServerData> serverDataMap = new ConcurrentHashMap<>();
     private final ScheduledExecutorService executorService = Executors.newScheduledThreadPool(10);
 
@@ -47,19 +48,18 @@ public class FlexNetVelocityInstanceController {
         this.instanceLifecycleManager = instanceLifecycleManager;
         this.logger = logger;
 
-        initializeInstanceCreation();
+        initializeInstances();
         schedulePerformanceAudits();
     }
 
-    private void initializeInstanceCreation() {
-        groupManager.getAllGroups().forEach(this::initializeGroupInstances);
+    // Initialize instances for all groups
+    private void initializeInstances() {
+        groupManager.getAllGroups().forEach(this::createInstancesForGroup);
     }
 
-    private void initializeGroupInstances(FlexNetGroup group) {
-        config.getTemplates().computeIfPresent(group.getId(), (id, template) -> {
-            createInstance(template, group);
-            return template;
-        });
+    private void createInstancesForGroup(FlexNetGroup group) {
+        Optional.ofNullable(config.getTemplates().get(group.getId()))
+                .ifPresent(template -> createInstance(template, group));
     }
 
     @Subscribe
@@ -67,6 +67,7 @@ public class FlexNetVelocityInstanceController {
         shutdownAllInstances();
     }
 
+    // Shutdown all instances gracefully
     private void shutdownAllInstances() {
         logger.info("Initiating shutdown of all instances...");
         CompletableFuture.allOf(serverDataMap.values().stream()
@@ -74,28 +75,23 @@ public class FlexNetVelocityInstanceController {
                 .toArray(CompletableFuture[]::new)).join();
 
         serverDataMap.keySet().forEach(this::deleteInstance);
-        clearAllServerPerformanceMetrics();
+        clearServerMetrics();
         logShutdownSummary();
     }
 
     private void deleteInstance(String instanceId) {
-        TaskUtils.runBlocking(latch -> {
-            instanceManager.deleteInstance(instanceId, success -> {
-                logInstanceDeletionStatus(instanceId, success);
-                serverDataMap.remove(instanceId);
-                latch.countDown();
-            });
-        });
+        TaskUtils.runBlocking(latch -> instanceManager.deleteInstance(instanceId, success -> {
+            if (success) {
+                logger.info("Successfully deleted instance {}", instanceId);
+            } else {
+                logger.error("Failed to delete instance {}", instanceId);
+            }
+            serverDataMap.remove(instanceId);
+            latch.countDown();
+        }));
     }
 
-    private void logInstanceDeletionStatus(String instanceId, boolean success) {
-        if (success) {
-            logger.info("Successfully deleted instance {}", instanceId);
-        } else {
-            logger.error("Failed to delete instance {}", instanceId);
-        }
-    }
-
+    // Create an instance asynchronously
     public CompletableFuture<String> createInstance(InstanceTemplate template, FlexNetGroup group) {
         CompletableFuture<String> future = new CompletableFuture<>();
         String instanceKey = generateInstanceKey(group);
@@ -105,29 +101,28 @@ public class FlexNetVelocityInstanceController {
 
         instanceManager.createInstance(template, result -> {
             if (result.isSuccess()) {
-                handleInstanceCreationSuccess(result.getInstanceId(), group, instanceKey, template, future, result.getAddress());
+                scheduleInstanceRegistration(result, group, instanceKey, template, future);
             } else {
-                handleInstanceCreationFailure(group, instanceKey, future);
+                handleInstanceFailure(group, instanceKey, future);
             }
         });
 
         return future;
     }
 
-    private void handleInstanceCreationSuccess(String instanceId, FlexNetGroup group, String instanceKey, InstanceTemplate template, CompletableFuture<String> future, String address) {
-        proxy.scheduleTask(() -> {
-            registerInstance(instanceId, group, address);
-            serverDataMap.get(instanceKey).getCreationFuture().complete(instanceId);
-        }, template.getServerOnlineDelay(), TimeUnit.MILLISECONDS);
+    private void scheduleInstanceRegistration(InstanceManager.InstanceResult result, FlexNetGroup group, String instanceKey, InstanceTemplate template, CompletableFuture<String> future) {
+        proxy.scheduleTask(() -> registerInstance(result.getInstanceId(), group, result.getAddress(), instanceKey, future),
+                template.getServerOnlineDelay(), TimeUnit.MILLISECONDS);
     }
 
-    private void registerInstance(String instanceId, FlexNetGroup group, String address) {
+    private void registerInstance(String instanceId, FlexNetGroup group, String address, String instanceKey, CompletableFuture<String> future) {
         proxy.addServer(instanceId, address, group);
         logger.info("Registered new instance {} for group {}", instanceId, group.getServerName());
+        serverDataMap.get(instanceKey).complete(instanceId);
         serverDataMap.get(instanceId).setUptime(System.currentTimeMillis());
     }
 
-    private void handleInstanceCreationFailure(FlexNetGroup group, String instanceKey, CompletableFuture<String> future) {
+    private void handleInstanceFailure(FlexNetGroup group, String instanceKey, CompletableFuture<String> future) {
         logger.error("Failed to create instance for group {}", group.getServerName());
         incrementFailureCount(group);
         serverDataMap.remove(instanceKey);
@@ -144,23 +139,26 @@ public class FlexNetVelocityInstanceController {
         });
     }
 
+    // Adjust instances based on player count changes
     public void adjustInstanceCountOnPlayerJoin(FlexNetGroup group) {
         if (group.canCreateInstance() && config.getTemplates().containsKey(group.getId())) {
-            int requiredServers = group.calculateRequiredServers();
-            long totalInstances = group.getValidServerCount();
+            long requiredInstances = calculateRequiredInstances(group);
 
-            if (requiredServers > totalInstances) {
-                createAdditionalInstances(group, requiredServers - totalInstances);
+            if (requiredInstances > group.getValidServerCount()) {
+                createAdditionalInstances(group, requiredInstances - group.getValidServerCount());
             }
 
-            scheduleServerHealthChecks(group);
+            scheduleHealthChecks(group);
         }
+    }
+
+    private long calculateRequiredInstances(FlexNetGroup group) {
+        return group.calculateRequiredServers();
     }
 
     private void createAdditionalInstances(FlexNetGroup group, long instancesToCreate) {
         for (int i = 0; i < instancesToCreate; i++) {
             logger.info("Creating additional instance for group {}", group.getServerName());
-            group.incrementValidServerCount();
             createInstance(config.getTemplates().get(group.getId()), group);
         }
     }
@@ -168,8 +166,7 @@ public class FlexNetVelocityInstanceController {
     public void adjustInstanceCountOnPlayerLeave(FlexNetGroup group) {
         if (group.needDeleteInstance() && config.getTemplates().containsKey(group.getId())) {
             logger.info("Evaluating instance removal for group {}", group.getServerName());
-            int idealServerCount = calculateIdealServerCount(group);
-            int serversToRemove = group.getValidServerCount() - idealServerCount;
+            long serversToRemove = group.getValidServerCount() - calculateIdealServerCount(group);
 
             if (serversToRemove > 0) {
                 scheduleInstanceRemoval(group, serversToRemove);
@@ -177,31 +174,31 @@ public class FlexNetVelocityInstanceController {
         }
     }
 
-    private int calculateIdealServerCount(FlexNetGroup group) {
-        return (int) Math.ceil((double) group.getAllPlayersCount() / group.getPlayerAmountToCreateInstance());
+    private long calculateIdealServerCount(FlexNetGroup group) {
+        return (long) Math.ceil((double) group.getAllPlayersCount() / group.getPlayerAmountToCreateInstance());
     }
 
-    private void scheduleInstanceRemoval(FlexNetGroup group, int serversToRemove) {
-        executorService.schedule(() -> removeExtraServers(group, serversToRemove), 5, TimeUnit.MINUTES);
+    private void scheduleInstanceRemoval(FlexNetGroup group, long serversToRemove) {
+        executorService.schedule(() -> removeServers(group, serversToRemove), 5, TimeUnit.MINUTES);
     }
 
-    private void removeExtraServers(FlexNetGroup group, int serversToRemove) {
+    private void removeServers(FlexNetGroup group, long serversToRemove) {
         for (int i = 0; i < serversToRemove; i++) {
-            RegisteredServer serverToRemove = group.getLowestPlayerServer(true);
-            if (serverToRemove != null) {
-                String serverId = serverToRemove.getServerInfo().getName();
-                logger.info("Removing server {} from group {}", serverId, group.getServerName());
-                group.decrementValidServerCount();
-                instanceLifecycleManager.handleServerLifecycle(serverId, group, false);
-                serverDataMap.get(serverId).setShutdown(true);
-            }
+            Optional.ofNullable(group.getLowestPlayerServer(true))
+                    .ifPresent(server -> {
+                        String serverId = server.getServerInfo().getName();
+                        logger.info("Removing server {} from group {}", serverId, group.getServerName());
+                        group.decrementValidServerCount();
+                        instanceLifecycleManager.handleServerLifecycle(serverId, group, false);
+                        serverDataMap.get(serverId).setShutdown(true);
+                    });
         }
         logServerShutdownStatus();
     }
 
-    private void scheduleServerHealthChecks(FlexNetGroup group) {
+    private void scheduleHealthChecks(FlexNetGroup group) {
         serverDataMap.values().stream()
-                .filter(data -> data.getGroup().equals(group.getServerName()))
+                .filter(data -> data.belongsToGroup(group.getServerName()))
                 .forEach(data -> executorService.schedule(() -> checkServerHealth(data), 30, TimeUnit.SECONDS));
     }
 
@@ -233,7 +230,8 @@ public class FlexNetVelocityInstanceController {
         logger.info("Server {} restart complete", data.getServerId());
     }
 
-    private void clearAllServerPerformanceMetrics() {
+    // Utility methods for server management
+    private void clearServerMetrics() {
         serverDataMap.values().forEach(data -> data.setPerformanceMetric(0));
         logger.info("Cleared all server performance metrics.");
     }
@@ -299,6 +297,10 @@ public class FlexNetVelocityInstanceController {
 
         String getGroup() {
             return group;
+        }
+
+        boolean belongsToGroup(String groupName) {
+            return group.equals(groupName);
         }
 
         int getFailures() {
