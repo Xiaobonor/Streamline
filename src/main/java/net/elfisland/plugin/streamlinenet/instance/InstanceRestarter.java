@@ -8,6 +8,7 @@ import net.elfisland.plugin.streamlinenet.group.FlexNetGroupManager;
 import org.slf4j.Logger;
 
 import java.util.HashMap;
+import java.util.Map;
 
 @Slf4j
 public class InstanceRestarter {
@@ -16,9 +17,10 @@ public class InstanceRestarter {
     private final InstanceLifecycleManager instanceLifecycleManager;
     private final Logger logger;
 
-    private static final HashMap<String, Long> serverUptime = new HashMap<>();
+    private static final Map<String, Long> serverUptime = new HashMap<>();
 
-    public InstanceRestarter(FlexNetProxy proxy, FlexNetGroupManager groupManager, InstanceLifecycleManager instanceLifecycleManager, Logger logger) {
+    public InstanceRestarter(FlexNetProxy proxy, FlexNetGroupManager groupManager,
+                             InstanceLifecycleManager instanceLifecycleManager, Logger logger) {
         this.proxy = proxy;
         this.groupManager = groupManager;
         this.instanceLifecycleManager = instanceLifecycleManager;
@@ -34,9 +36,11 @@ public class InstanceRestarter {
     }
 
     private void processGroupForRestart(FlexNetGroup group) {
-        group.getAllServers().stream()
-                .filter(entry -> !InstanceLifecycleManager.isInstanceInLifecycleProcess(entry.getKey()))
-                .forEach(entry -> checkServerForRestart(entry.getKey(), entry.getValue(), group));
+        group.getAllServers().forEach((serverId, server) -> {
+            if (!InstanceLifecycleManager.isInstanceInLifecycleProcess(serverId)) {
+                checkServerForRestart(serverId, server, group);
+            }
+        });
     }
 
     private void checkServerForRestart(String serverId, RegisteredServer server, FlexNetGroup group) {
@@ -44,23 +48,16 @@ public class InstanceRestarter {
         int restartInterval = group.getAutoRestartInterval();
 
         if (uptime >= restartInterval) {
+            logger.info("Server {} reached the restart interval of {} minutes. Initiating restart process.", serverId, restartInterval);
             instanceLifecycleManager.handleServerLifecycle(serverId, group, true);
         }
     }
 
     private long getServerUptime(String serverId) {
-        Long startTime = serverUptime.get(serverId);
-        if (startTime == null) {
-            logger.error("Server {} not found in serverUptime", serverId);
-            return 0;
-        }
-        long serverUptimeValue = (System.currentTimeMillis() - startTime) / (60 * 1000);
-        logger.info("Server {} uptime: {} minutes", serverId, serverUptimeValue);
-        return serverUptimeValue;
+        return serverUptime.getOrDefault(serverId, System.currentTimeMillis()) / (60 * 1000);
     }
 
     public static void removeFromServerUptime(String serverId) {
         serverUptime.remove(serverId);
     }
-
 }

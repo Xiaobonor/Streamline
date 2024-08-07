@@ -17,15 +17,14 @@ import net.elfisland.plugin.streamlinenet.group.FlexNetGroup;
 import org.slf4j.Logger;
 
 import java.text.MessageFormat;
-import java.util.HashMap;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Slf4j
-public class InstanceLifecycleManager{
+public class InstanceLifecycleManager {
     private final FlexNetProxy proxy;
     private final InstanceManager instanceManager;
     @Setter
@@ -34,10 +33,8 @@ public class InstanceLifecycleManager{
     private final FlexNetConfig config;
     private final Logger logger;
 
-    // which server is in the process of InstanceLifecycleManager(deleting old instance)
-    private static final HashMap<String, Boolean> serverShutdownInProgress = new HashMap<>();
-    // which server is in the process of InstanceLifecycleManager(creating new instance)
-    private static final HashMap<String, Boolean> instanceLifecycleInProgress = new HashMap<>();
+    private static final Map<String, Boolean> serverShutdownInProgress = new HashMap<>();
+    private static final Map<String, Boolean> instanceLifecycleInProgress = new HashMap<>();
 
     private final String clickablePartText;
     private final String transferMessageWithoutClickablePart;
@@ -51,39 +48,31 @@ public class InstanceLifecycleManager{
         this.instanceController = instanceController;
         this.config = config;
         this.logger = logger;
-        LocaleConfig locale = config.getLocale();
 
-        // preprocess restart message template
+        LocaleConfig locale = config.getLocale();
         String restartMessageTemplate = locale.getServerTransferWarning();
         Matcher matcher = Pattern.compile("\\{1}\\[(.*?)\\]").matcher(restartMessageTemplate);
-        if (matcher.find()) {
-            this.clickablePartText = matcher.group(1);
-        } else {
-            this.clickablePartText = "";
-        }
-
-        this.transferMessageWithoutClickablePart =
-                restartMessageTemplate.replaceFirst("\\{1}\\[.*?\\]", "");
+        this.clickablePartText = matcher.find() ? matcher.group(1) : "";
+        this.transferMessageWithoutClickablePart = restartMessageTemplate.replaceFirst("\\{1}\\[.*?\\]", "");
     }
 
     public void handleServerLifecycle(String serverId, FlexNetGroup group, boolean createNewInstance) {
         if (instanceLifecycleInProgress.getOrDefault(serverId, false)) {
-            logger.error("instanceLifecycle process for server {} is already in progress", serverId);
+            logger.error("InstanceLifecycle process for server {} is already in progress", serverId);
             return;
         }
         instanceLifecycleInProgress.put(serverId, true);
 
-        if (createNewInstance) {
-            CompletableFuture<String> future = instanceController.createInstance(
-                    config.getTemplates().get(group.getId()), group);
+        CompletableFuture<String> future = createNewInstance ?
+                instanceController.createInstance(config.getTemplates().get(group.getId()), group) :
+                CompletableFuture.completedFuture(getLowestPlayerServerId(group));
 
-            future.thenAccept(newServerId -> handleServerClose(serverId, group, newServerId));
-        } else {
-            // pick a lowest player server as newServerId
-            RegisteredServer newServer = group.getLowestPlayerServer(true);
-            String newServerId = newServer == null ? null : newServer.getServerInfo().getName();
-            handleServerClose(serverId, group, newServerId);
-        }
+        future.thenAccept(newServerId -> handleServerClose(serverId, group, newServerId));
+    }
+
+    private String getLowestPlayerServerId(FlexNetGroup group) {
+        RegisteredServer newServer = group.getLowestPlayerServer(true);
+        return newServer != null ? newServer.getServerInfo().getName() : null;
     }
 
     private void handleServerClose(String serverId, FlexNetGroup group, String newServerId) {
@@ -93,87 +82,79 @@ public class InstanceLifecycleManager{
         long firstWarningTime = group.getTransferWarningIntervals()[0];
         logger.info("Kicking players of server {} in {} seconds", serverId, firstWarningTime);
 
-        CompletableFuture<Void> kickFuture = CompletableFuture.runAsync(() ->
-                        kickPlayersGradually(newServerId, serverId, group),
-                CompletableFuture.delayedExecutor(firstWarningTime, TimeUnit.SECONDS));
-
-        kickFuture.thenRun(() -> deleteServerAfterWait(serverId, group, group.getPostShutdownWait()));
+        CompletableFuture.runAsync(() -> kickPlayersGradually(newServerId, serverId, group),
+                CompletableFuture.delayedExecutor(firstWarningTime, TimeUnit.SECONDS))
+                .thenRun(() -> deleteServerAfterWait(serverId, group, group.getPostShutdownWait()));
     }
 
     private void deleteServerAfterWait(String serverId, FlexNetGroup group, int waitTime) {
         logger.info("Deleting server {} in {} minutes", serverId, waitTime);
         proxy.scheduleTask(() -> {
             if (group.getServer(serverId) != null) {
-                instanceController.removeInstanceId(serverId);
-                serverShutdownInProgress.remove(serverId);
-                instanceLifecycleInProgress.remove(serverId);
-                InstanceRestarter.removeFromServerUptime(serverId);
-                proxy.removeServer(serverId, group);
-                instanceManager.deleteInstance(serverId, (b) -> {});
+                cleanupServerData(serverId, group);
             }
         }, waitTime * 60L);
+    }
+
+    private void cleanupServerData(String serverId, FlexNetGroup group) {
+        instanceController.removeInstanceId(serverId);
+        serverShutdownInProgress.remove(serverId);
+        instanceLifecycleInProgress.remove(serverId);
+        InstanceRestarter.removeFromServerUptime(serverId);
+        proxy.removeServer(serverId, group);
+        instanceManager.deleteInstance(serverId, (b) -> {});
     }
 
     private void scheduleTransferReminders(String serverId, FlexNetGroup group, String newServerId) {
         int[] intervals = group.getTransferWarningIntervals();
         int firstWarningTime = intervals[0];
 
-        for (int interval : intervals) {
-            long delay = firstWarningTime - interval;
-            if (delay >= 0) {
-                proxy.scheduleTask(() -> notifyPlayersOfTransfer(serverId, group, newServerId, interval), delay);
-            }
-        }
+        Arrays.stream(intervals)
+                .filter(interval -> firstWarningTime - interval >= 0)
+                .forEach(interval -> proxy.scheduleTask(() -> notifyPlayersOfTransfer(serverId, group, newServerId, interval), firstWarningTime - interval));
     }
 
-    private void notifyPlayersOfTransfer(String serverId, FlexNetGroup group,
-                                        String newServerId, int leftTime) {
+    private void notifyPlayersOfTransfer(String serverId, FlexNetGroup group, String newServerId, int leftTime) {
         RegisteredServer server = group.getServer(serverId);
         if (server == null) {
             logger.error("Server {} not found for notification", serverId);
             return;
         }
 
-        String transferMessageFormatted = MessageFormat.format(this.transferMessageWithoutClickablePart, leftTime);
-
-        TextComponent clickablePart = Component.text(this.clickablePartText)
-                // TODO: will.. need add a option to config to change color and hover text?
-                .color(TextColor.fromHexString("#00A5FF"))
-                .hoverEvent(HoverEvent.showText(Component.text(this.clickablePartText)))
-                .clickEvent(ClickEvent.runCommand("/JoinNew " + newServerId + " " + group.getServerName()));
-        TextComponent finalMessage = Component.text(transferMessageFormatted).append(clickablePart);
-
+        TextComponent finalMessage = buildTransferMessage(newServerId, group, leftTime);
         server.getPlayersConnected().forEach(player -> player.sendMessage(finalMessage));
         logger.info("Notified players of server {} transfer in {} seconds", serverId, leftTime);
     }
 
-    private void kickPlayersGradually(String newServerId, String serverId, FlexNetGroup group) {
-        CompletableFuture<Void> future = new CompletableFuture<>();
-        RegisteredServer server = group.getServer(serverId);
-        String groupName = group.getServerName();
+    private TextComponent buildTransferMessage(String newServerId, FlexNetGroup group, int leftTime) {
+        String transferMessageFormatted = MessageFormat.format(this.transferMessageWithoutClickablePart, leftTime);
 
-        if (server != null) {
-            kickPlayers(server, newServerId, groupName, future);
-        } else {
+        TextComponent clickablePart = Component.text(this.clickablePartText)
+                .color(TextColor.fromHexString("#00A5FF"))
+                .hoverEvent(HoverEvent.showText(Component.text(this.clickablePartText)))
+                .clickEvent(ClickEvent.runCommand("/JoinNew " + newServerId + " " + group.getServerName()));
+
+        return Component.text(transferMessageFormatted).append(clickablePart);
+    }
+
+    private void kickPlayersGradually(String newServerId, String serverId, FlexNetGroup group) {
+        RegisteredServer server = group.getServer(serverId);
+        if (server == null) {
             logger.info("Server {} not found for kicking players", serverId);
-            future.complete(null);
+            return;
         }
 
+        CompletableFuture<Void> future = CompletableFuture.runAsync(() -> kickPlayers(server, newServerId, group.getServerName()));
         future.thenRun(() -> log.info("Kicking players done"));
     }
 
-    private void kickPlayers(RegisteredServer server, String newServerId, String groupName, CompletableFuture<Void> future) {
-        if (!server.getPlayersConnected().isEmpty()) {
+    private void kickPlayers(RegisteredServer server, String newServerId, String groupName) {
+        while (!server.getPlayersConnected().isEmpty()) {
             log.info("Kicking players of server {}", server.getServerInfo().getName());
+            server.getPlayersConnected().stream().limit(5).forEach(player ->
+                    joinNewCommand.redirectPlayerToTargetServer(player.getUniqueId(), newServerId, groupName, player, true));
 
-            server.getPlayersConnected().stream().limit(5).forEach(player -> {
-                UUID playerId = player.getUniqueId();
-                joinNewCommand.redirectPlayerToTargetServer(playerId, newServerId, groupName, player, true);
-            });
-
-            proxy.scheduleTask(() -> kickPlayers(server, newServerId, groupName, future), 3);
-        } else {
-            future.complete(null);
+            proxy.scheduleTask(() -> kickPlayers(server, newServerId, groupName), 3);
         }
     }
 
@@ -185,6 +166,4 @@ public class InstanceLifecycleManager{
     public static boolean isInShutdownProcess(String serverId) {
         return serverShutdownInProgress.getOrDefault(serverId, false);
     }
-
 }
-
