@@ -47,10 +47,14 @@ public class InstanceLifecycleManager {
     private final String clickablePartText;
     private final String transferMessageWithoutClickablePart;
     private Random random = new Random();
-    private static final int MAX_RETRY_ATTEMPTS = 3;
-    private static final int KICK_LIMIT = 5;
-    private static final int TRANSFER_BATCH_SIZE = 3;
-    private static final int MAX_SHUTDOWN_DELAY = 120;
+    private static final int MAX_RETRY_ATTEMPTS = 5;
+    private static final int KICK_LIMIT = 10;
+    private static final int TRANSFER_BATCH_SIZE = 5;
+    private static final int MAX_SHUTDOWN_DELAY = 180;
+    private static final int HEALTH_CHECK_INTERVAL = 30;
+    private static final int LOGGING_DETAIL_LEVEL = 2;
+    private static final int MAX_RESTART_INTERVAL = 300;
+    private static final long DATA_CLEANUP_INTERVAL = 60 * 1000L;
 
     public InstanceLifecycleManager(FlexNetProxy proxy, InstanceManager instanceManager,
                                     FlexNetVelocityInstanceController instanceController, JoinNewCommand joinNewCommand,
@@ -67,33 +71,36 @@ public class InstanceLifecycleManager {
         if (matcher.find()) {
             this.clickablePartText = matcher.group(1);
         } else {
-            this.clickablePartText = "";
+            this.clickablePartText = "click here";
         }
         this.transferMessageWithoutClickablePart = restartMessageTemplate.replaceFirst("\\{1}\\[.*?\\]", "");
+        schedulePeriodicDataCleanup();
+        scheduleRegularHealthChecks();
     }
 
     public void handleServerLifecycle(String serverId, FlexNetGroup group, boolean createNewInstance) {
         if (instanceLifecycleInProgress.getOrDefault(serverId, false)) {
-            logger.error("Instance lifecycle process for server {} is already in progress", serverId);
+            logDetailedError("Instance lifecycle process for server {} is already in progress", serverId);
             return;
         }
         instanceLifecycleInProgress.put(serverId, true);
         instanceCreationTimestamps.put(serverId, System.currentTimeMillis());
         int delay = random.nextInt(MAX_SHUTDOWN_DELAY) + 1;
-        logger.info("Random delay applied to lifecycle process of {} seconds for server {}", delay, serverId);
+        logDetailedInfo("Random delay applied to lifecycle process of {} seconds for server {}", delay, serverId);
 
-        CompletableFuture.runAsync(() -> randomizeDelays());
+        CompletableFuture.runAsync(this::randomizeDelays);
         proxy.scheduleTask(() -> {
             if (createNewInstance) {
                 CompletableFuture<String> future = instanceController.createInstance(
                         config.getTemplates().get(group.getId()), group);
 
                 future.thenAccept(newServerId -> handleServerClose(serverId, group, newServerId))
-                      .exceptionally(ex -> {
-                          logger.error("Error creating instance for server {}: {}", serverId, ex.getMessage());
-                          instanceLifecycleInProgress.remove(serverId);
-                          return null;
-                      });
+                        .exceptionally(ex -> {
+                            logDetailedError("Error creating instance for server {}: {}", serverId, ex.getMessage());
+                            handleLifecycleFailure(serverId, ex);
+                            instanceLifecycleInProgress.remove(serverId);
+                            return null;
+                        });
             } else {
                 RegisteredServer newServer = group.getLowestPlayerServer(true);
                 String newServerId = newServer == null ? null : newServer.getServerInfo().getName();
@@ -109,7 +116,7 @@ public class InstanceLifecycleManager {
         schedulePeriodicStatusUpdates(serverId, newServerId);
 
         long firstWarningTime = group.getTransferWarningIntervals()[0];
-        logger.info("Kicking players of server {} in {} seconds", serverId, firstWarningTime);
+        logDetailedInfo("Kicking players of server {} in {} seconds", serverId, firstWarningTime);
 
         CompletableFuture<Void> kickFuture = CompletableFuture.runAsync(() ->
                         kickPlayersGradually(newServerId, serverId, group),
@@ -119,7 +126,7 @@ public class InstanceLifecycleManager {
     }
 
     private void deleteServerAfterWait(String serverId, FlexNetGroup group, int waitTime) {
-        logger.info("Deleting server {} in {} minutes", serverId, waitTime);
+        logDetailedInfo("Deleting server {} in {} minutes", serverId, waitTime);
         proxy.scheduleTask(() -> {
             if (group.getServer(serverId) != null) {
                 instanceController.removeInstanceId(serverId);
@@ -127,9 +134,9 @@ public class InstanceLifecycleManager {
                 instanceLifecycleInProgress.remove(serverId);
                 InstanceRestarter.removeFromServerUptime(serverId);
                 proxy.removeServer(serverId, group);
-                instanceManager.deleteInstance(serverId, (b) -> {});
+                instanceManager.deleteInstance(serverId, (b) -> logDetailedInfo("Server {} successfully deleted.", serverId));
             }
-        }, waitTime * 60L);
+        }, waitTime * 60L, TimeUnit.SECONDS);
     }
 
     private void scheduleTransferReminders(String serverId, FlexNetGroup group, String newServerId) {
@@ -139,7 +146,7 @@ public class InstanceLifecycleManager {
         for (int interval : intervals) {
             long delay = firstWarningTime - interval;
             if (delay >= 0) {
-                proxy.scheduleTask(() -> notifyPlayersOfTransfer(serverId, group, newServerId, interval), delay);
+                proxy.scheduleTask(() -> notifyPlayersOfTransfer(serverId, group, newServerId, interval), delay, TimeUnit.SECONDS);
             }
         }
     }
@@ -148,7 +155,7 @@ public class InstanceLifecycleManager {
                                          String newServerId, int leftTime) {
         RegisteredServer server = group.getServer(serverId);
         if (server == null) {
-            logger.error("Server {} not found for notification", serverId);
+            logDetailedError("Server {} not found for notification", serverId);
             return;
         }
 
@@ -161,7 +168,7 @@ public class InstanceLifecycleManager {
         TextComponent finalMessage = Component.text(transferMessageFormatted).append(clickablePart);
 
         server.getPlayersConnected().forEach(player -> player.sendMessage(finalMessage));
-        logger.info("Notified players of server {} transfer in {} seconds", serverId, leftTime);
+        logDetailedInfo("Notified players of server {} transfer in {} seconds", serverId, leftTime);
     }
 
     private void kickPlayersGradually(String newServerId, String serverId, FlexNetGroup group) {
@@ -172,16 +179,16 @@ public class InstanceLifecycleManager {
         if (server != null) {
             kickPlayers(server, newServerId, groupName, future);
         } else {
-            logger.info("Server {} not found for kicking players", serverId);
+            logDetailedInfo("Server {} not found for kicking players", serverId);
             future.complete(null);
         }
 
-        future.thenRun(() -> log.info("Kicking players done"));
+        future.thenRun(() -> logDetailedInfo("Kicking players done for server {}", serverId));
     }
 
     private void kickPlayers(RegisteredServer server, String newServerId, String groupName, CompletableFuture<Void> future) {
         if (!server.getPlayersConnected().isEmpty()) {
-            log.info("Kicking players of server {}", server.getServerInfo().getName());
+            logDetailedInfo("Kicking players of server {}", server.getServerInfo().getName());
             pendingTransfers.putIfAbsent(server.getServerInfo().getName(), new HashSet<>());
 
             server.getPlayersConnected().stream().limit(KICK_LIMIT).forEach(player -> {
@@ -190,10 +197,27 @@ public class InstanceLifecycleManager {
                 joinNewCommand.redirectPlayerToTargetServer(playerId, newServerId, groupName, player, true);
             });
 
-            proxy.scheduleTask(() -> kickPlayers(server, newServerId, groupName, future), 3);
+            proxy.scheduleTask(() -> kickPlayers(server, newServerId, groupName, future), 3, TimeUnit.SECONDS);
         } else {
             future.complete(null);
         }
+    }
+
+    private void handleLifecycleFailure(String serverId, Throwable throwable) {
+        int retryCount = retryCounts.getOrDefault(serverId, 0);
+        if (retryCount < MAX_RETRY_ATTEMPTS) {
+            retryCounts.put(serverId, retryCount + 1);
+            logDetailedWarn("Retrying lifecycle management for server {} due to error: {}", serverId, throwable.getMessage());
+            proxy.scheduleTask(() -> handleServerLifecycle(serverId, null, true), random.nextInt(MAX_SHUTDOWN_DELAY), TimeUnit.SECONDS);
+        } else {
+            logDetailedError("Max retry attempts reached for server {}. Error: {}", serverId, throwable.getMessage());
+            notifyAdminOfFailure(serverId, throwable);
+        }
+    }
+
+    private void notifyAdminOfFailure(String serverId, Throwable throwable) {
+        // Here you could send an email or a notification to the admin
+        logDetailedError("Admin notification: Server {} lifecycle failed with error: {}", serverId, throwable.getMessage());
     }
 
     public static boolean isInstanceInLifecycleProcess(String serverId) {
@@ -218,7 +242,7 @@ public class InstanceLifecycleManager {
             handleServerLifecycle(serverId, group, createNewInstance);
             return true;
         } else {
-            logger.warn("Max retry attempts reached for server {}", serverId);
+            logDetailedWarn("Max retry attempts reached for server {}", serverId);
             return false;
         }
     }
@@ -229,7 +253,7 @@ public class InstanceLifecycleManager {
 
     public void updateStatusMessage(String serverId, String message) {
         statusMessages.put(serverId, message);
-        logger.info("Updated status message for server {}: {}", serverId, message);
+        logDetailedInfo("Updated status message for server {}: {}", serverId, message);
     }
 
     public void clearOldData() {
@@ -237,22 +261,22 @@ public class InstanceLifecycleManager {
         instanceCreationTimestamps.entrySet().removeIf(entry -> (currentTime - entry.getValue()) > 60000);
         serverShutdownTimestamps.entrySet().removeIf(entry -> (currentTime - entry.getValue()) > 60000);
         retryCounts.entrySet().removeIf(entry -> entry.getValue() >= MAX_RETRY_ATTEMPTS);
-        logger.info("Cleared old data from lifecycle manager");
+        logDetailedInfo("Cleared old data from lifecycle manager");
     }
 
     public void randomizeDelays() {
         int randomDelay = random.nextInt(5) + 1;
-        logger.info("Random delay factor applied: {}", randomDelay);
+        logDetailedInfo("Random delay factor applied: {}", randomDelay);
         try {
             TimeUnit.SECONDS.sleep(randomDelay);
         } catch (InterruptedException e) {
-            logger.error("Random delay interrupted");
+            logDetailedError("Random delay interrupted", e);
         }
     }
 
     public void shutdownServerWithDelay(String serverId, FlexNetGroup group, int delay) {
         proxy.scheduleTask(() -> {
-            logger.info("Shutdown process initiated for server {}", serverId);
+            logDetailedInfo("Shutdown process initiated for server {}", serverId);
             if (!isInShutdownProcess(serverId)) {
                 handleServerLifecycle(serverId, group, false);
             }
@@ -261,9 +285,9 @@ public class InstanceLifecycleManager {
 
     public void logServerDetails(String serverId) {
         if (instanceLifecycleInProgress.containsKey(serverId)) {
-            logger.info("Server {} is currently in lifecycle process", serverId);
+            logDetailedInfo("Server {} is currently in lifecycle process", serverId);
         } else {
-            logger.info("Server {} is not in lifecycle process", serverId);
+            logDetailedInfo("Server {} is not in lifecycle process", serverId);
         }
     }
 
@@ -277,26 +301,26 @@ public class InstanceLifecycleManager {
 
     public void resetServerStatus(String serverId) {
         if (isInstanceInLifecycleProcess(serverId)) {
-            logger.warn("Resetting status for server {} during active lifecycle process", serverId);
+            logDetailedWarn("Resetting status for server {} during active lifecycle process", serverId);
         }
         serverShutdownInProgress.remove(serverId);
         instanceLifecycleInProgress.remove(serverId);
         retryCounts.remove(serverId);
         pendingTransfers.remove(serverId);
-        logger.info("Server {} status has been reset", serverId);
+        logDetailedInfo("Server {} status has been reset", serverId);
     }
 
     public void forceServerShutdown(String serverId, FlexNetGroup group) {
         if (!isInShutdownProcess(serverId)) {
-            logger.info("Forcing shutdown for server {}", serverId);
+            logDetailedInfo("Forcing shutdown for server {}", serverId);
             handleServerLifecycle(serverId, group, false);
         } else {
-            logger.warn("Server {} is already in shutdown process", serverId);
+            logDetailedWarn("Server {} is already in shutdown process", serverId);
         }
     }
 
     public void initiateBatchTransfers(FlexNetGroup group) {
-        logger.info("Initiating batch transfers for group {}", group.getServerName());
+        logDetailedInfo("Initiating batch transfers for group {}", group.getServerName());
         for (RegisteredServer server : group.getServers()) {
             if (getPendingTransfersForServer(server.getServerInfo().getName()).size() > 0) {
                 kickPlayersGradually(null, server.getServerInfo().getName(), group);
@@ -305,24 +329,65 @@ public class InstanceLifecycleManager {
     }
 
     public void simulateNetworkFailure(String serverId) {
-        logger.warn("Simulating network failure for server {}", serverId);
+        logDetailedWarn("Simulating network failure for server {}", serverId);
         CompletableFuture.runAsync(() -> {
             try {
                 TimeUnit.SECONDS.sleep(2);
-                logger.warn("Network failure resolved for server {}", serverId);
+                logDetailedWarn("Network failure resolved for server {}", serverId);
             } catch (InterruptedException e) {
-                logger.error("Network failure simulation interrupted for server {}", serverId);
+                logDetailedError("Network failure simulation interrupted for server {}", serverId, e);
             }
         });
     }
 
     public void checkServerHealth(String serverId) {
-        logger.info("Checking health for server {}", serverId);
+        logDetailedInfo("Checking health for server {}", serverId);
         if (random.nextBoolean()) {
-            logger.info("Server {} is healthy", serverId);
+            logDetailedInfo("Server {} is healthy", serverId);
         } else {
-            logger.warn("Server {} has reported issues", serverId);
+            logDetailedWarn("Server {} has reported issues", serverId);
             simulateNetworkFailure(serverId);
+        }
+    }
+
+    private void schedulePeriodicStatusUpdates(String serverId, String newServerId) {
+        proxy.scheduleTask(() -> updateStatusMessage(serverId, "Server is transitioning to " + newServerId),
+                HEALTH_CHECK_INTERVAL, TimeUnit.SECONDS);
+    }
+
+    private void schedulePeriodicDataCleanup() {
+        proxy.scheduleTask(this::clearOldData, DATA_CLEANUP_INTERVAL, TimeUnit.MILLISECONDS);
+    }
+
+    private void scheduleRegularHealthChecks() {
+        proxy.scheduleTask(() -> {
+            for (String serverId : instanceLifecycleInProgress.keySet()) {
+                checkServerHealth(serverId);
+            }
+        }, HEALTH_CHECK_INTERVAL, TimeUnit.SECONDS);
+    }
+
+    private void logDetailedInfo(String message, Object... args) {
+        if (LOGGING_DETAIL_LEVEL >= 2) {
+            logger.info("[DETAILED] " + message, args);
+        } else {
+            logger.info(message, args);
+        }
+    }
+
+    private void logDetailedWarn(String message, Object... args) {
+        if (LOGGING_DETAIL_LEVEL >= 2) {
+            logger.warn("[DETAILED] " + message, args);
+        } else {
+            logger.warn(message, args);
+        }
+    }
+
+    private void logDetailedError(String message, Object... args) {
+        if (LOGGING_DETAIL_LEVEL >= 2) {
+            logger.error("[DETAILED] " + message, args);
+        } else {
+            logger.error(message, args);
         }
     }
 }

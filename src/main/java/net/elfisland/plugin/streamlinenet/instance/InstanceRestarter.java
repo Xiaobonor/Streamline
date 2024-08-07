@@ -2,9 +2,9 @@ package net.elfisland.plugin.streamlinenet.instance;
 
 import com.velocitypowered.api.proxy.server.RegisteredServer;
 import lombok.extern.slf4j.Slf4j;
-import net.elfisland.plugin.streamlinenet.platform.FlexNetProxy;
 import net.elfisland.plugin.streamlinenet.group.FlexNetGroup;
 import net.elfisland.plugin.streamlinenet.group.FlexNetGroupManager;
+import net.elfisland.plugin.streamlinenet.platform.FlexNetProxy;
 import org.slf4j.Logger;
 
 import java.util.HashMap;
