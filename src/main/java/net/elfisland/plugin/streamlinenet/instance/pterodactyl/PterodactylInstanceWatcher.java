@@ -11,8 +11,7 @@ import net.elfisland.plugin.streamlinenet.platform.FlexNetProxy;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.*;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -22,10 +21,12 @@ public class PterodactylInstanceWatcher {
     private final FlexNetProxy proxy;
     private final PteroClient client;
     private final Map<UUID, WatchTask> tasks = new ConcurrentHashMap<>();
+    private final ExecutorService executorService;
 
     public PterodactylInstanceWatcher(FlexNetProxy proxy, PteroClient client) {
         this.proxy = proxy;
         this.client = client;
+        this.executorService = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
         initScheduler();
     }
 
@@ -35,13 +36,19 @@ public class PterodactylInstanceWatcher {
 
     private void executeTasks() {
         Set<UUID> removableUUIDs = ConcurrentHashMap.newKeySet();
-        tasks.forEach((key, watchTask) -> CompletableFuture.runAsync(() -> {
-            ClientServer server = watchTask.server.execute();
-            if (watchTask.waitForState.apply(server)) {
-                watchTask.onStateChanged.accept(server);
-                removableUUIDs.add(key);
-            }
-        }));
+        tasks.forEach((key, watchTask) -> {
+            CompletableFuture.runAsync(() -> {
+                try {
+                    ClientServer server = watchTask.server.execute();
+                    if (watchTask.waitForState.apply(server)) {
+                        watchTask.onStateChanged.accept(server);
+                        removableUUIDs.add(key);
+                    }
+                } catch (Exception e) {
+                    log.error("Error executing task for server: " + key, e);
+                }
+            }, executorService);
+        });
         removableUUIDs.forEach(tasks::remove);
     }
 
@@ -68,5 +75,16 @@ public class PterodactylInstanceWatcher {
         private PteroAction<ClientServer> server;
         private Function<ClientServer, Boolean> waitForState;
         private Consumer<ClientServer> onStateChanged;
+    }
+
+    public void shutdown() {
+        executorService.shutdown();
+        try {
+            if (!executorService.awaitTermination(60, TimeUnit.SECONDS)) {
+                executorService.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            executorService.shutdownNow();
+        }
     }
 }

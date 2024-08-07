@@ -7,8 +7,9 @@ import net.elfisland.plugin.streamlinenet.group.FlexNetGroup;
 import net.elfisland.plugin.streamlinenet.group.FlexNetGroupManager;
 import org.slf4j.Logger;
 
-import java.util.HashMap;
+import java.util.Collections;
 import java.util.Map;
+import java.util.WeakHashMap;
 
 @Slf4j
 public class InstanceRestarter {
@@ -17,7 +18,8 @@ public class InstanceRestarter {
     private final InstanceLifecycleManager instanceLifecycleManager;
     private final Logger logger;
 
-    private static final Map<String, Long> serverUptime = new HashMap<>();
+    // Use WeakHashMap to prevent memory leaks
+    private static final Map<String, Long> serverUptime = Collections.synchronizedMap(new WeakHashMap<>());
 
     public InstanceRestarter(FlexNetProxy proxy, FlexNetGroupManager groupManager,
                              InstanceLifecycleManager instanceLifecycleManager, Logger logger) {
@@ -54,7 +56,11 @@ public class InstanceRestarter {
     }
 
     private long getServerUptime(String serverId) {
-        return serverUptime.getOrDefault(serverId, System.currentTimeMillis()) / (60 * 1000);
+        Long startTime = serverUptime.get(serverId);
+        if (startTime == null) {
+            return 0;
+        }
+        return (System.currentTimeMillis() - startTime) / (60 * 1000);
     }
 
     public static void removeFromServerUptime(String serverId) {

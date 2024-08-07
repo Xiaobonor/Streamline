@@ -19,6 +19,7 @@ import org.slf4j.Logger;
 import java.text.MessageFormat;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -33,8 +34,9 @@ public class InstanceLifecycleManager {
     private final FlexNetConfig config;
     private final Logger logger;
 
-    private static final Map<String, Boolean> serverShutdownInProgress = new HashMap<>();
-    private static final Map<String, Boolean> instanceLifecycleInProgress = new HashMap<>();
+    // Use ConcurrentHashMap for thread-safe and efficient access
+    private static final Map<String, Boolean> serverShutdownInProgress = new ConcurrentHashMap<>();
+    private static final Map<String, Boolean> instanceLifecycleInProgress = new ConcurrentHashMap<>();
 
     private final String clickablePartText;
     private final String transferMessageWithoutClickablePart;
@@ -57,17 +59,26 @@ public class InstanceLifecycleManager {
     }
 
     public void handleServerLifecycle(String serverId, FlexNetGroup group, boolean createNewInstance) {
-        if (instanceLifecycleInProgress.getOrDefault(serverId, false)) {
+        if (instanceLifecycleInProgress.putIfAbsent(serverId, true) != null) {
             logger.error("InstanceLifecycle process for server {} is already in progress", serverId);
             return;
         }
-        instanceLifecycleInProgress.put(serverId, true);
 
-        CompletableFuture<String> future = createNewInstance ?
-                instanceController.createInstance(config.getTemplates().get(group.getId()), group) :
-                CompletableFuture.completedFuture(getLowestPlayerServerId(group));
+        CompletableFuture<String> future = createNewInstance
+                ? instanceController.createInstance(config.getTemplates().get(group.getId()), group)
+                : CompletableFuture.completedFuture(getLowestPlayerServerId(group));
 
-        future.thenAccept(newServerId -> handleServerClose(serverId, group, newServerId));
+        future.thenAccept(newServerId -> {
+            try {
+                handleServerClose(serverId, group, newServerId);
+            } finally {
+                instanceLifecycleInProgress.remove(serverId);
+            }
+        }).exceptionally(ex -> {
+            logger.error("Error handling server lifecycle for server {}: {}", serverId, ex.getMessage());
+            instanceLifecycleInProgress.remove(serverId);
+            return null;
+        });
     }
 
     private String getLowestPlayerServerId(FlexNetGroup group) {
@@ -82,9 +93,11 @@ public class InstanceLifecycleManager {
         long firstWarningTime = group.getTransferWarningIntervals()[0];
         logger.info("Kicking players of server {} in {} seconds", serverId, firstWarningTime);
 
-        CompletableFuture.runAsync(() -> kickPlayersGradually(newServerId, serverId, group),
-                CompletableFuture.delayedExecutor(firstWarningTime, TimeUnit.SECONDS))
-                .thenRun(() -> deleteServerAfterWait(serverId, group, group.getPostShutdownWait()));
+        CompletableFuture.delayedExecutor(firstWarningTime, TimeUnit.SECONDS)
+                .execute(() -> {
+                    kickPlayersGradually(newServerId, serverId, group);
+                    deleteServerAfterWait(serverId, group, group.getPostShutdownWait());
+                });
     }
 
     private void deleteServerAfterWait(String serverId, FlexNetGroup group, int waitTime) {
@@ -99,7 +112,6 @@ public class InstanceLifecycleManager {
     private void cleanupServerData(String serverId, FlexNetGroup group) {
         instanceController.removeInstanceId(serverId);
         serverShutdownInProgress.remove(serverId);
-        instanceLifecycleInProgress.remove(serverId);
         InstanceRestarter.removeFromServerUptime(serverId);
         proxy.removeServer(serverId, group);
         instanceManager.deleteInstance(serverId, (b) -> {});
@@ -144,18 +156,19 @@ public class InstanceLifecycleManager {
             return;
         }
 
-        CompletableFuture<Void> future = CompletableFuture.runAsync(() -> kickPlayers(server, newServerId, group.getServerName()));
-        future.thenRun(() -> log.info("Kicking players done"));
+        kickPlayers(server, newServerId, group.getServerName());
     }
 
     private void kickPlayers(RegisteredServer server, String newServerId, String groupName) {
-        while (!server.getPlayersConnected().isEmpty()) {
-            log.info("Kicking players of server {}", server.getServerInfo().getName());
-            server.getPlayersConnected().stream().limit(5).forEach(player ->
-                    joinNewCommand.redirectPlayerToTargetServer(player.getUniqueId(), newServerId, groupName, player, true));
-
-            proxy.scheduleTask(() -> kickPlayers(server, newServerId, groupName), 3);
+        if (server.getPlayersConnected().isEmpty()) {
+            return;
         }
+
+        log.info("Kicking players of server {}", server.getServerInfo().getName());
+        server.getPlayersConnected().stream().limit(5).forEach(player ->
+                joinNewCommand.redirectPlayerToTargetServer(player.getUniqueId(), newServerId, groupName, player, true));
+
+        proxy.scheduleTask(() -> kickPlayers(server, newServerId, groupName), 3);
     }
 
     public static boolean isInstanceInLifecycleProcess(String serverId) {
