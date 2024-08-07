@@ -7,6 +7,7 @@ import lombok.Setter;
 import net.elfisland.plugin.streamlinenet.instance.InstanceLifecycleManager;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Builder
 public class FlexNetGroup {
@@ -14,33 +15,33 @@ public class FlexNetGroup {
     private static final Random RANDOM = new Random();
 
     @Getter
-    private String id;
+    private final String id;
     @Getter
-    private String fromHostname;
+    private final String fromHostname;
     @Getter
-    private String serverName;
+    private final String serverName;
     @Getter
-    private String hubServer;
+    private final String hubServer;
     @Getter
-    private int maxInstance;
+    private final int maxInstance;
     @Getter
-    private int playerAmountToCreateInstance;
+    private final int playerAmountToCreateInstance;
     @Getter
-    private int autoRestartInterval;
+    private final int autoRestartInterval;
     @Getter
-    private int[] transferWarningIntervals;
+    private final int[] transferWarningIntervals;
     @Getter
-    private int postShutdownWait;
+    private final int postShutdownWait;
 
     @Builder.Default
-    private transient HashMap<String, RegisteredServer> serverMap = new HashMap<>();
+    private final Map<String, RegisteredServer> serverMap = new HashMap<>();
 
-    // TODO: config or something
     @Setter
     @Getter
     @Builder.Default
     private int validServerCount = 1;
 
+    // Server management methods
     public void addServer(String id, RegisteredServer server) {
         serverMap.put(id, server);
     }
@@ -57,45 +58,44 @@ public class FlexNetGroup {
         return serverMap.containsKey(id);
     }
 
-    public Set<Map.Entry<String, RegisteredServer>> getAllServers() {
-        return serverMap.entrySet();
+    public Set<RegisteredServer> getAllServers() {
+        return new HashSet<>(serverMap.values());
     }
 
     public int getServerAmount() {
         return serverMap.size();
     }
 
-    // The boolean parameter is to detect the server in the process of InstanceLifecycleManager or only detect shutdown?
-    public RegisteredServer getLowestPlayerServer(boolean needDetectIsInLifecycleProgress) {
-        if (needDetectIsInLifecycleProgress) {
-            return serverMap.entrySet().stream()
-                    .filter(entry -> !InstanceLifecycleManager.isInstanceInLifecycleProcess(entry.getKey()))
-                    .min(Comparator.comparingInt(entry -> entry.getValue().getPlayersConnected().size()))
-                    .map(Map.Entry::getValue)
-                    .orElse(null);
-        } else {
-            return serverMap.entrySet().stream()
-                    .filter(entry -> !InstanceLifecycleManager.isInShutdownProcess(entry.getKey()))
-                    .min(Comparator.comparingInt(entry -> entry.getValue().getPlayersConnected().size()))
-                    .map(Map.Entry::getValue)
-                    .orElse(null);
-        }
+    // Server selection methods
+    public RegisteredServer getLowestPlayerServer(boolean detectLifecycleProcess) {
+        return serverMap.entrySet().stream()
+                .filter(entry -> isServerEligible(entry.getKey(), detectLifecycleProcess))
+                .min(Comparator.comparingInt(entry -> entry.getValue().getPlayersConnected().size()))
+                .map(Map.Entry::getValue)
+                .orElse(null);
+    }
+
+    private boolean isServerEligible(String serverId, boolean detectLifecycleProcess) {
+        return detectLifecycleProcess ?
+                !InstanceLifecycleManager.isInstanceInLifecycleProcess(serverId) :
+                !InstanceLifecycleManager.isInShutdownProcess(serverId);
     }
 
     public int getAllPlayersCount() {
         return serverMap.values().stream()
-                .filter(Objects::nonNull)
                 .mapToInt(server -> server.getPlayersConnected().size())
-                .sum() + 1;
+                .sum();
     }
 
+    // Instance management methods
     public boolean canCreateInstance() {
         return validServerCount < maxInstance &&
                 (validServerCount == 0 || (getAllPlayersCount() / validServerCount) >= playerAmountToCreateInstance);
     }
 
     public boolean needDeleteInstance() {
-        return validServerCount > 1 && (getAllPlayersCount() / validServerCount) < playerAmountToCreateInstance;
+        return validServerCount > 1 &&
+                (getAllPlayersCount() / validServerCount) < playerAmountToCreateInstance;
     }
 
     public int calculateRequiredServers() {
@@ -105,6 +105,4 @@ public class FlexNetGroup {
     public boolean canConnect() {
         return !serverMap.isEmpty();
     }
-
-
 }

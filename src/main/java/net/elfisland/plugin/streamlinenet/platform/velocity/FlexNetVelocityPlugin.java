@@ -39,14 +39,14 @@ import java.util.function.Supplier;
         name = "StreamlineNet",
         version = "1.0.0",
         description = "Velocity plugin for adding sub-servers dynamically",
-        authors = {"Xiaobo (Elf Island)"}
+        authors = { "Xiaobo (Elf Island)" }
 )
 public class FlexNetVelocityPlugin implements FlexNetProxy {
 
     private final ProxyServer proxyServer;
     private final Logger logger;
     private final Path dataFolder;
-    private final Supplier<FlexNetConfig> configSupplier = Suppliers.memoize(this::loadConfig);
+    private final Supplier<FlexNetConfig> configSupplier = Suppliers.memoize(this::getConfig);
 
     private InstanceManager instanceManager;
     private FlexNetVelocityInstanceController instanceController;
@@ -69,55 +69,44 @@ public class FlexNetVelocityPlugin implements FlexNetProxy {
     public void onProxyInitialization(ProxyInitializeEvent event) {
         logger.info("FlexNet is initializing...");
 
-        // Initialize configuration
-        FlexNetConfig config = configSupplier.get();
+        FlexNetConfig config = configSupplier.get(); // init config
 
-        // Setup components
-        setupComponents(config);
-
-        // Register events and commands
-        registerListenersAndCommands();
-
-        // Schedule periodic tasks
-        schedulePeriodicTasks();
-    }
-
-    // Setup components with necessary dependencies
-    private void setupComponents(FlexNetConfig config) {
         this.instanceManager = new PterodactylInstanceManager(config.getPterodactyl(), this, logger);
         this.groupManager = new FlexNetGroupManager(config, logger);
-        this.instanceController = new FlexNetVelocityInstanceController(this, groupManager, instanceManager, config, instanceLifecycleManager, logger);
+        this.instanceController = new FlexNetVelocityInstanceController(this, groupManager, instanceManager,
+                config, instanceLifecycleManager, logger);
         this.joinNewCommand = new JoinNewCommand(proxyServer, logger, config, groupManager, playerTargetServerMap);
-        this.instanceLifecycleManager = new InstanceLifecycleManager(this, instanceManager, instanceController, joinNewCommand, config, logger);
+        this.instanceLifecycleManager = new InstanceLifecycleManager(this, instanceManager,
+                instanceController, joinNewCommand, config, logger);
         this.instanceRestarter = new InstanceRestarter(this, groupManager, instanceLifecycleManager, logger);
-
-        // Set bidirectional references
-        this.instanceLifecycleManager.setInstanceController(instanceController);
-        this.instanceController.setInstanceLifecycleManager(instanceLifecycleManager);
-    }
-
-    // Register event listeners and commands
-    private void registerListenersAndCommands() {
         HubServerListener hubServerListener = new HubServerListener(this, proxyServer, playerTargetServerMap, logger);
 
-        proxyServer.getEventManager().register(this, new FlexNetVelocityPlayerForwarder(proxyServer, groupManager, configSupplier.get(), proxyServer, instanceController, logger));
+        proxyServer.getEventManager().register(this,
+                new FlexNetVelocityPlayerForwarder(proxyServer, groupManager, config, proxyServer, instanceController, logger));
         proxyServer.getEventManager().register(this, instanceController);
         proxyServer.getCommandManager().register("JoinNew", joinNewCommand);
         proxyServer.getEventManager().register(this, hubServerListener);
+
+        this.instanceLifecycleManager.setInstanceController(instanceController);
+        this.instanceController.setInstanceLifecycleManager(instanceLifecycleManager);
+
+        // Check and restart servers every 60 seconds
+        restartTask = this.scheduleRepeatTask(instanceRestarter::checkAndRestartServers, 1L, 60L);
     }
 
-    // Schedule tasks that need to run periodically
-    private void schedulePeriodicTasks() {
-        restartTask = scheduleRepeatingTask(instanceRestarter::checkAndRestartServers, 60L);
-    }
+    /**
+     * Method to read the config file, create a new one if not exists
+     * @return FlexNetConfig object converted from toml config
+     */
+    private FlexNetConfig getConfig() {
+        File dataFolder = this.dataFolder.toFile();
+        if (!dataFolder.exists()) dataFolder.mkdirs();
 
-    // Load configuration from file
-    private FlexNetConfig loadConfig() {
-        File configFile = dataFolder.resolve("config.toml").toFile();
-        if (!configFile.exists()) {
-            FileUtils.copyFileFromJar(getClass().getClassLoader(), "config.toml", configFile.toPath());
-        }
-        return new Toml().read(configFile).to(FlexNetConfig.class);
+        File file = new File(dataFolder, "config.toml");
+        if (!file.exists())
+            FileUtils.copyFileFromJar(getClass().getClassLoader(), "config.toml", file.toPath());
+
+        return new Toml().read(file).to(FlexNetConfig.class);
     }
 
     @Override
@@ -134,28 +123,24 @@ public class FlexNetVelocityPlugin implements FlexNetProxy {
 
     @Override
     public void scheduleTask(Runnable runnable, long delay) {
-        scheduleTaskWithDelay(runnable, delay, ChronoUnit.SECONDS);
+        proxyServer.getScheduler().buildTask(this, runnable)
+                .delay(Duration.of(delay, ChronoUnit.SECONDS))
+                .schedule();
     }
 
     @Override
     public void scheduleTask(Runnable runnable, long delay, boolean isMillisecond) {
-        scheduleTaskWithDelay(runnable, delay, isMillisecond ? ChronoUnit.MILLIS : ChronoUnit.SECONDS);
-    }
-
-    private void scheduleTaskWithDelay(Runnable runnable, long delay, ChronoUnit unit) {
         proxyServer.getScheduler().buildTask(this, runnable)
-                .delay(Duration.of(delay, unit))
+                .delay(Duration.of(delay, ChronoUnit.MILLIS))
                 .schedule();
     }
 
     @Override
     public ScheduledTask scheduleRepeatTask(Runnable runnable, long delay, long interval) {
-        return scheduleRepeatingTask(runnable, interval).delay(Duration.of(delay, ChronoUnit.SECONDS)).schedule();
-    }
-
-    private ScheduledTask scheduleRepeatingTask(Runnable runnable, long interval) {
         return proxyServer.getScheduler().buildTask(this, runnable)
+                .delay(Duration.of(delay, ChronoUnit.SECONDS))
                 .repeat(Duration.of(interval, ChronoUnit.SECONDS))
                 .schedule();
     }
+
 }

@@ -23,11 +23,7 @@ public class JoinNewCommand implements SimpleCommand {
     private final FlexNetGroupManager groupManager;
     private final Map<UUID, String> playerTargetServerMap;
 
-    private final String usageMessage;
-    private final String serverNotFoundMessage;
-    private final String groupNotFoundMessage;
-    private final String serverRestartingMessage;
-    private final String playerInServerMessage;
+    private final LocaleConfig locale;
 
     public JoinNewCommand(ProxyServer proxyServer, Logger logger, FlexNetConfig config,
                           FlexNetGroupManager groupManager, Map<UUID, String> playerTargetServerMap) {
@@ -35,49 +31,52 @@ public class JoinNewCommand implements SimpleCommand {
         this.logger = logger;
         this.groupManager = groupManager;
         this.playerTargetServerMap = playerTargetServerMap;
-        LocaleConfig locale = config.getLocale();
-
-        this.usageMessage = locale.getJoinNewCommandUsage();
-        this.serverNotFoundMessage = locale.getJoinNewServerNotFound();
-        this.groupNotFoundMessage = locale.getJoinNewGroupNotFound();
-        this.serverRestartingMessage = locale.getJoinNewServerRestarting();
-        this.playerInServerMessage = locale.getPlayerInServerMessage();
+        this.locale = config.getLocale();
     }
 
     @Override
     public void execute(Invocation invocation) {
-        if (invocation.arguments().length < 1) {
-            invocation.source().sendMessage(Component.text(usageMessage));
+        if (!(invocation.source() instanceof Player player)) {
             return;
         }
 
-        String groupName = invocation.arguments()[0];
-        String targetServerId = invocation.arguments().length > 1 ? invocation.arguments()[1] : null;
-        Player player = (Player) invocation.source();
-
-        if (!groupManager.hasGroup(groupName)) {
-            player.sendMessage(Component.text(MessageFormat.format(groupNotFoundMessage, groupName)));
+        String[] args = invocation.arguments();
+        if (args.length < 1) {
+            player.sendMessage(Component.text(locale.getJoinNewCommandUsage()));
             return;
         }
+
+        String groupName = args[0];
+        String targetServerId = args.length > 1 ? args[1] : null;
 
         FlexNetGroup group = groupManager.getGroup(groupName);
+        if (group == null) {
+            player.sendMessage(Component.text(MessageFormat.format(locale.getJoinNewGroupNotFound(), groupName)));
+            return;
+        }
+
         if (targetServerId == null) {
             targetServerId = group.getLowestPlayerServer(true).getServerInfo().getName();
         }
 
-        Optional<?> server = proxyServer.getServer(targetServerId);
+        redirectToServer(player, groupName, targetServerId);
+    }
+
+    private void redirectToServer(Player player, String groupName, String targetServerId) {
+        Optional<RegisteredServer> server = proxyServer.getServer(targetServerId);
+
         if (server.isEmpty()) {
-            player.sendMessage(Component.text(MessageFormat.format(serverNotFoundMessage, targetServerId)));
+            player.sendMessage(Component.text(MessageFormat.format(locale.getJoinNewServerNotFound(), targetServerId)));
             return;
         }
 
         if (InstanceLifecycleManager.isInstanceInLifecycleProcess(targetServerId)) {
-            player.sendMessage(Component.text(MessageFormat.format(serverRestartingMessage, targetServerId)));
+            player.sendMessage(Component.text(MessageFormat.format(locale.getJoinNewServerRestarting(), targetServerId)));
             return;
         }
 
         if (player.getCurrentServer().isPresent() && player.getCurrentServer().get().getServerInfo().getName().equals(targetServerId)) {
-            player.sendMessage(Component.text(MessageFormat.format(playerInServerMessage, targetServerId)));
+            player.sendMessage(Component.text(MessageFormat.format(locale.getPlayerInServerMessage(), targetServerId)));
             return;
         }
 
@@ -87,17 +86,23 @@ public class JoinNewCommand implements SimpleCommand {
     public void redirectPlayerToTargetServer(UUID playerId, String targetServerId, String groupName, Player player, boolean fullFindLowestServer) {
         FlexNetGroup group = groupManager.getGroup(groupName);
 
-        if (fullFindLowestServer && proxyServer.getServer(targetServerId).get().getPlayersConnected().size() > group.getPlayerAmountToCreateInstance() - 5) {
+        if (fullFindLowestServer && proxyServer.getServer(targetServerId).map(s -> s.getPlayersConnected().size() > group.getPlayerAmountToCreateInstance() - 5).orElse(false)) {
             targetServerId = group.getLowestPlayerServer(true).getServerInfo().getName();
         }
 
         playerTargetServerMap.put(playerId, targetServerId);
+        connectPlayerToHubServer(player, groupName, targetServerId);
+    }
+
+    private void connectPlayerToHubServer(Player player, String groupName, String targetServerId) {
+        FlexNetGroup group = groupManager.getGroup(groupName);
         String hubServerId = group.getHubServer();
+
         if (hubServerId != null && !hubServerId.isEmpty()) {
             proxyServer.getServer(hubServerId).ifPresent(hubServer -> player.createConnectionRequest(hubServer).fireAndForget());
         } else {
-            logger.error("Hub server not found for group: " + groupName);
-            playerTargetServerMap.remove(playerId);
+            logger.error("Hub server not found for group: {}", groupName);
+            playerTargetServerMap.remove(player.getUniqueId());
         }
     }
 }

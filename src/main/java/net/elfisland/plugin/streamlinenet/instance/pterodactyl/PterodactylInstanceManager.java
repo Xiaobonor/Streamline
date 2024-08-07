@@ -7,12 +7,11 @@ import com.mattmalec.pterodactyl4j.application.entities.*;
 import com.mattmalec.pterodactyl4j.client.entities.PteroClient;
 import com.mattmalec.pterodactyl4j.client.entities.Utilization;
 import lombok.extern.slf4j.Slf4j;
-import net.elfisland.plugin.streamlinenet.config.PterodactylConfig;
 import net.elfisland.plugin.streamlinenet.instance.InstanceCreationResult;
 import net.elfisland.plugin.streamlinenet.instance.InstanceManager;
-import net.elfisland.plugin.streamlinenet.model.InstanceTemplate;
 import net.elfisland.plugin.streamlinenet.platform.FlexNetProxy;
-import org.slf4j.Logger;
+import net.elfisland.plugin.streamlinenet.config.PterodactylConfig;
+import net.elfisland.plugin.streamlinenet.model.InstanceTemplate;
 
 import java.net.InetSocketAddress;
 import java.util.List;
@@ -21,6 +20,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import org.slf4j.Logger;
 
 @Slf4j
 public class PterodactylInstanceManager implements InstanceManager {

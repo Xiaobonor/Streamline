@@ -26,7 +26,7 @@ public class FlexNetVelocityInstanceController {
 
     private final FlexNetProxy proxy;
     private final FlexNetGroupManager groupManager;
-    private final org.slf4j.Logger logger;
+    private final Logger logger;
     private final InstanceManager instanceManager;
     private final FlexNetConfig config;
     @Setter

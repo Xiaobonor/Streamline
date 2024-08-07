@@ -2,42 +2,51 @@ package net.elfisland.plugin.streamlinenet.group;
 
 import lombok.extern.slf4j.Slf4j;
 import net.elfisland.plugin.streamlinenet.config.FlexNetConfig;
+import net.elfisland.plugin.streamlinenet.config.GroupConfig;
 import org.slf4j.Logger;
 
-import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.HashMap;
+import java.util.stream.Collectors;
 
 @Slf4j
 public class FlexNetGroupManager {
 
     private final FlexNetConfig config;
     private final Logger logger;
-    private final HashMap<String, FlexNetGroup> groupIdMap = new HashMap<>();
-    private final HashMap<String, FlexNetGroup> groupFromHostMap = new HashMap<>();
+    private final Map<String, FlexNetGroup> groupIdMap = new HashMap<>();
+    private final Map<String, FlexNetGroup> groupFromHostMap = new HashMap<>();
 
     public FlexNetGroupManager(FlexNetConfig config, Logger logger) {
         this.config = config;
         this.logger = logger;
-        initMap();
+        initializeGroups();
     }
 
-    private void initMap() {
-        config.getGroups().forEach((key, value) -> {
-            FlexNetGroup group = FlexNetGroup.builder()
-                    .id(key)
-                    .fromHostname(value.getFromHostname())
-                    .serverName(value.getServerName())
-                    .hubServer(value.getHubServer())
-                    .autoRestartInterval(value.getAutoRestartInterval())
-                    .transferWarningIntervals(value.getTransferWarningIntervals())
-                    .playerAmountToCreateInstance(value.getPlayerAmountToCreateInstance())
-                    .maxInstance(value.getMaxInstance())
-                    .postShutdownWait(value.getPostShutdownWait())
-                    .build();
-            groupIdMap.put(key, group);
-            groupFromHostMap.put(group.getFromHostname(), group);
-        });
+    private void initializeGroups() {
+        config.getGroups().forEach(this::createAndRegisterGroup);
         logger.info("Loaded {} groups: {}", groupIdMap.size(), String.join(", ", groupIdMap.keySet()));
+    }
+
+    private void createAndRegisterGroup(String key, GroupConfig value) {
+        FlexNetGroup group = buildGroupFromConfig(key, value);
+        groupIdMap.put(key, group);
+        groupFromHostMap.put(group.getFromHostname(), group);
+    }
+
+    private FlexNetGroup buildGroupFromConfig(String id, GroupConfig config) {
+        return FlexNetGroup.builder()
+                .id(id)
+                .fromHostname(config.getFromHostname())
+                .serverName(config.getServerName())
+                .hubServer(config.getHubServer())
+                .autoRestartInterval(config.getAutoRestartInterval())
+                .transferWarningIntervals(config.getTransferWarningIntervals())
+                .playerAmountToCreateInstance(config.getPlayerAmountToCreateInstance())
+                .maxInstance(config.getMaxInstance())
+                .postShutdownWait(config.getPostShutdownWait())
+                .build();
     }
 
     public FlexNetGroup getGroup(String id) {
@@ -56,8 +65,7 @@ public class FlexNetGroupManager {
         return groupFromHostMap.containsKey(fromHostname);
     }
 
-    public ArrayList<FlexNetGroup> getAllGroups() {
-        return new ArrayList<>(groupIdMap.values());
+    public List<FlexNetGroup> getAllGroups() {
+        return List.copyOf(groupIdMap.values());
     }
-
 }
