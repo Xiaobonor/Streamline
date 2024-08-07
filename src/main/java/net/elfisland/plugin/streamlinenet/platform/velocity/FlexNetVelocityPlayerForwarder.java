@@ -18,6 +18,7 @@ import net.elfisland.plugin.streamlinenet.group.FlexNetGroupManager;
 import org.slf4j.Logger;
 
 import java.net.InetSocketAddress;
+import java.util.Optional;
 
 @Slf4j
 public class FlexNetVelocityPlayerForwarder {
@@ -28,10 +29,8 @@ public class FlexNetVelocityPlayerForwarder {
     private final FlexNetVelocityInstanceController instanceController;
     private final Logger logger;
 
-
     public FlexNetVelocityPlayerForwarder(ProxyServer server, FlexNetGroupManager groupManager, FlexNetConfig config,
-                                          ProxyServer proxyServer, FlexNetVelocityInstanceController instanceController,
-                                          Logger logger) {
+                                          FlexNetVelocityInstanceController instanceController, Logger logger) {
         this.proxyServer = server;
         this.groupManager = groupManager;
         this.locale = config.getLocale();
@@ -42,74 +41,71 @@ public class FlexNetVelocityPlayerForwarder {
     @Subscribe
     public void onLogin(LoginEvent event) {
         Player player = event.getPlayer();
+        Optional<InetSocketAddress> virtualHostOptional = player.getVirtualHost();
 
-        if(player.getVirtualHost().isEmpty()) {
-            event.setResult(ResultedEvent.ComponentResult.denied(
-                    Component.text(locale.getInvalidHostname())
-            ));
-            logger.warn(
-                    "Player {} ({}) attempt to join the server without VHost",
-                    player.getGameProfile().getName(),
-                    player.getUniqueId()
-            );
+        if (virtualHostOptional.isEmpty()) {
+            denyLogin(event, locale.getInvalidHostname(), player, "without VHost");
+            return;
         }
-        InetSocketAddress address = player.getVirtualHost().get();
-        if(address.getHostName() == null || !groupManager.hasGroupFromHost(address.getHostName())) {
-            // Kick player if their hostname is not listed in config
-            event.setResult(ResultedEvent.ComponentResult.denied(
-                    Component.text(locale.getInvalidHostname())
-            ));
-            logger.warn(
-                    "Player {} ({}) attempt to join the server with invalid VHost: {}",
-                    player.getGameProfile().getName(),
-                    player.getUniqueId(),
-                    address.getHostName()
-            );
-        } else if(!groupManager.getGroupFromHost(address.getHostName()).canConnect()) {
-            // Kick player if the group has no server available
-            event.setResult(ResultedEvent.ComponentResult.denied(
-                    Component.text(locale.getNoServerAvailable())
-            ));
-            logger.warn(
-                    "Player {} ({}) attempt to join the server with no available server in group {}",
-                    player.getGameProfile().getName(),
-                    player.getUniqueId(),
-                    groupManager.getGroupFromHost(address.getHostName()).getId()
-            );
+
+        InetSocketAddress address = virtualHostOptional.get();
+        String hostname = address.getHostName();
+
+        if (hostname == null || !groupManager.hasGroupFromHost(hostname)) {
+            denyLogin(event, locale.getInvalidHostname(), player, "with invalid VHost: " + hostname);
+        } else {
+            FlexNetGroup group = groupManager.getGroupFromHost(hostname);
+            if (!group.canConnect()) {
+                denyLogin(event, locale.getNoServerAvailable(), player, "with no available server in group " + group.getId());
+            }
         }
+    }
+
+    private void denyLogin(LoginEvent event, String reason, Player player, String logSuffix) {
+        event.setResult(ResultedEvent.ComponentResult.denied(Component.text(reason)));
+        logger.warn("Player {} ({}) attempted to join the server {}", player.getGameProfile().getName(), player.getUniqueId(), logSuffix);
     }
 
     @Subscribe
     public void onChooseInitServer(PlayerChooseInitialServerEvent event) {
         Player player = event.getPlayer();
+        Optional<InetSocketAddress> virtualHostOptional = player.getVirtualHost();
 
-        if(player.getVirtualHost().isEmpty()) return;
-        InetSocketAddress address = player.getVirtualHost().get();
-        FlexNetGroup group = groupManager.getGroupFromHost(address.getHostName());
-        RegisteredServer server = group.getLowestPlayerServer(false);
-        event.setInitialServer(server);
+        if (virtualHostOptional.isEmpty()) {
+            return;
+        }
 
-        proxyServer.getEventManager().fireAndForget(new FlexNetVelocityPlayerForwardedEvent(player, group, server));
-        instanceController.adjustInstanceCountOnPlayerJoin(group);
+        InetSocketAddress address = virtualHostOptional.get();
+        String hostname = address.getHostName();
+        FlexNetGroup group = groupManager.getGroupFromHost(hostname);
 
-        logger.info("Forwarded player {} ({}) to server {}",
-                player.getGameProfile().getName(),
-                player.getUniqueId(),
-                server.getServerInfo().getName()
-        );
+        if (group != null) {
+            RegisteredServer server = group.getLowestPlayerServer(false);
+            event.setInitialServer(server);
+
+            proxyServer.getEventManager().fireAndForget(new FlexNetVelocityPlayerForwardedEvent(player, group, server));
+            instanceController.adjustInstanceCountOnPlayerJoin(group);
+
+            logger.info("Forwarded player {} ({}) to server {}", player.getGameProfile().getName(), player.getUniqueId(), server.getServerInfo().getName());
+        }
     }
 
     @Subscribe
     public void onPlayerLeave(DisconnectEvent event) {
         Player player = event.getPlayer();
-        if(player.getVirtualHost().isEmpty()) return; // TODO: maybe handle this case?
-        InetSocketAddress address = player.getVirtualHost().get();
-        FlexNetGroup group = groupManager.getGroupFromHost(address.getHostName());
+        Optional<InetSocketAddress> virtualHostOptional = player.getVirtualHost();
+
+        if (virtualHostOptional.isEmpty()) {
+            return;
+        }
+
+        InetSocketAddress address = virtualHostOptional.get();
+        String hostname = address.getHostName();
+        FlexNetGroup group = groupManager.getGroupFromHost(hostname);
 
         if (group != null) {
             instanceController.adjustInstanceCountOnPlayerLeave(group);
+            logger.info("Adjusted instance count for group {} after player {} ({}) left", group.getId(), player.getGameProfile().getName(), player.getUniqueId());
         }
     }
-
-
 }
