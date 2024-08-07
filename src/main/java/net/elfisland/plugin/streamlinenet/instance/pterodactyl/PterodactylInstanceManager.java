@@ -20,7 +20,6 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
-import org.slf4j.Logger;
 
 @Slf4j
 public class PterodactylInstanceManager implements InstanceManager {
@@ -28,17 +27,15 @@ public class PterodactylInstanceManager implements InstanceManager {
     private final PterodactylConfig config;
     private final PteroApplication api;
     private final PterodactylInstanceWatcher watcher;
-    private final Logger logger;
     private final FlexNetProxy proxy;
     private final Map<String, Boolean> deleteInProgress = new ConcurrentHashMap<>();
 
-    public PterodactylInstanceManager(PterodactylConfig config, FlexNetProxy proxy, Logger logger) {
+    public PterodactylInstanceManager(PterodactylConfig config, FlexNetProxy proxy) {
         this.config = config;
         this.proxy = proxy;
         this.api = PteroBuilder.createApplication(config.getApiUrl(), config.getApiKey());
         PteroClient client = PteroBuilder.createClient(config.getApiUrl(), config.getClientApiKey());
         this.watcher = new PterodactylInstanceWatcher(proxy, client);
-        this.logger = logger;
     }
 
     /**
@@ -48,61 +45,68 @@ public class PterodactylInstanceManager implements InstanceManager {
     @Override
     public void createInstance(InstanceTemplate template, Consumer<InstanceCreationResult> resultConsumer) {
         CompletableFuture.runAsync(() -> {
+            boolean success = false;
             for (int attempt = 0; attempt < 3; attempt++) {
                 try {
-                    Optional<ApplicationServer> serverOptional = tryCreateServer(template);
-                    if (serverOptional.isPresent()) {
-                        ApplicationServer server = serverOptional.get();
-                        executeWatcher(server, resultConsumer, server.getAllocations().stream().findFirst());
-                        logger.info("Server {} created successfully", server.getName());
-                        return;
+                    if (attemptToCreateServer(template, resultConsumer)) {
+                        success = true;
+                        break;
                     }
                 } catch (Exception e) {
-                    logger.error("Attempt {} - Failed to create server: {}", attempt + 1, e.getMessage());
+                    log.error("Attempt {} - Failed to create server: {}", attempt + 1, e.getMessage());
                 }
             }
-            logger.error("All attempts to create the server have failed.");
+            if (!success) {
+                log.error("All attempts to create the server have failed.");
+                resultConsumer.accept(InstanceCreationResult.builder().success(false).build());
+            }
         }).join();
+    }
+
+    private boolean attemptToCreateServer(InstanceTemplate template, Consumer<InstanceCreationResult> resultConsumer) throws Exception {
+        Optional<ApplicationServer> serverOptional = tryCreateServer(template);
+        if (serverOptional.isPresent()) {
+            ApplicationServer server = serverOptional.get();
+            executeWatcher(server, resultConsumer, server.getAllocations().stream().findFirst());
+            log.info("Server {} created successfully", server.getName());
+            return true;
+        }
+        return false;
     }
 
     private Optional<ApplicationServer> tryCreateServer(InstanceTemplate template) throws Exception {
         Nest nest = api.retrieveNestById(template.getNestId()).execute();
         ApplicationEgg egg = api.retrieveEggById(nest, template.getEggId()).execute();
-        ApplicationUser owner = api.retrieveUserById(template.getDefaultOwnerId()).execute(); // Maybe it isn't necessary?
+        ApplicationUser owner = api.retrieveUserById(template.getDefaultOwnerId()).execute();
         Optional<ApplicationAllocation> optAllocation = findAvailableAllocation();
 
         if (optAllocation.isEmpty()) {
-            logger.error("No available allocation found");
+            log.error("No available allocation found");
             return Optional.empty();
         }
 
-        logger.info("Allocation {} found, creating server...", optAllocation.get().getAlias());
-        logger.info("Owner: {} | Egg: {}", owner.getFullName(), egg.getName());
+        log.info("Allocation {} found, creating server...", optAllocation.get().getAlias());
+        log.info("Owner: {} | Egg: {}", owner.getFullName(), egg.getName());
 
-        ApplicationServer server = createServer(template, Optional.of(optAllocation.get()), owner, egg);
-        return Optional.of(server);
+        return Optional.of(createServer(template, optAllocation.get(), owner, egg));
     }
 
     private Optional<ApplicationAllocation> findAvailableAllocation() throws Exception {
         return api.retrieveAllocations()
                 .execute()
                 .stream()
-                .filter(appAllocation -> appAllocation.getAlias() != null &&
-                        !appAllocation.isAssigned() &&
-                        appAllocation.getAlias().startsWith(config.getAllocationAliasPrefix()))
+                .filter(allocation -> allocation.getAlias() != null &&
+                        !allocation.isAssigned() &&
+                        allocation.getAlias().startsWith(config.getAllocationAliasPrefix()))
                 .findFirst();
     }
 
-    private ApplicationServer createServer(InstanceTemplate template, Optional<ApplicationAllocation> optAllocation,
+    private ApplicationServer createServer(InstanceTemplate template, ApplicationAllocation allocation,
                                            ApplicationUser owner, ApplicationEgg egg) throws Exception {
-        if (optAllocation.isEmpty()) {
-            throw new IllegalStateException("Allocation is not present");
-        }
-
         return api.createServer()
                 .setName(template.getNameTemplate())
                 .setDescription(template.getDescription())
-                .setAllocations(optAllocation.get())
+                .setAllocations(allocation)
                 .setOwner(owner)
                 .setEgg(egg)
                 .setCPU(template.getCpuAmount())
@@ -123,10 +127,10 @@ public class PterodactylInstanceManager implements InstanceManager {
                 server.getIdentifier(),
                 clientServer -> {},
                 clientServer -> {
-                    logger.info("Server {} installing: {} suspended: {}", clientServer.getName(), clientServer.isInstalling(), clientServer.isSuspended());
+                    log.info("Server {} installing: {} suspended: {}", clientServer.getName(), clientServer.isInstalling(), clientServer.isSuspended());
                     if (clientServer.isInstalling() || clientServer.isSuspended()) return false;
                     Utilization utilization = clientServer.retrieveUtilization().execute();
-                    logger.info("Server {} state = {}", clientServer.getName(), utilization.getState());
+                    log.info("Server {} state = {}", clientServer.getName(), utilization.getState());
                     if (utilization.getState() == UtilizationState.OFFLINE) {
                         clientServer.start().execute();
                     }
@@ -143,21 +147,20 @@ public class PterodactylInstanceManager implements InstanceManager {
         );
     }
 
-
     @Override
     public void deleteInstance(String identifier, Consumer<Boolean> callback) {
         if (deleteInProgress.putIfAbsent(identifier, true) != null) {
-            logger.warn("Instance deletion already in progress for: {}", identifier);
+            log.warn("Instance deletion already in progress for: {}", identifier);
             return;
         }
 
-        logger.info("Deleting instance {}...", identifier);
+        log.info("Deleting instance {}...", identifier);
         watcher.createTask(
                 identifier,
                 clientServer -> clientServer.stop().execute(),
                 clientServer -> {
                     Utilization utilization = clientServer.retrieveUtilization().execute();
-                    logger.info("Server {} state = {}", identifier, utilization.getState());
+                    log.info("Server {} state = {}", identifier, utilization.getState());
                     return utilization.getState() == UtilizationState.OFFLINE;
                 },
                 clientServer -> {
@@ -171,5 +174,4 @@ public class PterodactylInstanceManager implements InstanceManager {
                 }
         );
     }
-
 }

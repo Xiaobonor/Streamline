@@ -8,10 +8,11 @@ import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import net.elfisland.plugin.streamlinenet.platform.FlexNetProxy;
 
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -20,7 +21,7 @@ public class PterodactylInstanceWatcher {
 
     private final FlexNetProxy proxy;
     private final PteroClient client;
-    private final HashMap<UUID, WatchTask> tasks = new HashMap<>();
+    private final Map<UUID, WatchTask> tasks = new ConcurrentHashMap<>();
 
     public PterodactylInstanceWatcher(FlexNetProxy proxy, PteroClient client) {
         this.proxy = proxy;
@@ -29,19 +30,19 @@ public class PterodactylInstanceWatcher {
     }
 
     private void initScheduler() {
-        proxy.scheduleRepeatTask(() -> {
-            HashSet<UUID> removableUUIDs = new HashSet<>();
-            tasks.forEach((key, watchTask) -> {
-                CompletableFuture.runAsync(() -> {
-                    ClientServer server = watchTask.server.execute();
-                    if(watchTask.waitForState.apply(server)) {
-                        watchTask.onStateChanged.accept(server);
-                        removableUUIDs.add(key);
-                    }
-                }).join();
-            });
-            removableUUIDs.forEach(tasks::remove);
-        }, 0L, 15L);
+        proxy.scheduleRepeatTask(this::executeTasks, 0L, 15L);
+    }
+
+    private void executeTasks() {
+        Set<UUID> removableUUIDs = ConcurrentHashMap.newKeySet();
+        tasks.forEach((key, watchTask) -> CompletableFuture.runAsync(() -> {
+            ClientServer server = watchTask.server.execute();
+            if (watchTask.waitForState.apply(server)) {
+                watchTask.onStateChanged.accept(server);
+                removableUUIDs.add(key);
+            }
+        }));
+        removableUUIDs.forEach(tasks::remove);
     }
 
     public void createTask(
@@ -68,5 +69,4 @@ public class PterodactylInstanceWatcher {
         private Function<ClientServer, Boolean> waitForState;
         private Consumer<ClientServer> onStateChanged;
     }
-
 }
